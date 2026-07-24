@@ -80,22 +80,25 @@ export class LiveForwarder {
         if (!isCurrent()) return
         this.stopHeartbeat()
         if (this.connected) log.info('Live forwarder disconnected — retrying in 5s')
+        else log.warn('Live forwarder: connection closed before reaching open — retrying in 5s')
         this.connected = false
         this.scheduleReconnect()
       })
-      socket.on('error', () => {
+      socket.on('error', (err) => {
         if (!isCurrent()) return
         // Reconnect from here directly rather than relying on close() to
         // cascade into the 'close' handler above — a socket that errors
         // before ever reaching OPEN doesn't reliably emit 'close' after
         // close() is called on it, which previously left the forwarder
         // stuck disconnected forever with no reconnect ever scheduled.
+        log.warn(`Live forwarder: connection error — retrying in 5s (${(err as Error).message})`)
         this.stopHeartbeat()
         this.connected = false
         this.scheduleReconnect()
         try { socket.close() } catch { /* already closing */ }
       })
-    } catch {
+    } catch (err) {
+      log.warn(`Live forwarder: failed to construct WebSocket — retrying in 5s (${(err as Error).message})`)
       this.scheduleReconnect()
     }
   }

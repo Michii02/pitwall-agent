@@ -8,6 +8,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { execFileSync } from 'node:child_process'
 import dotenv from 'dotenv'
 
 // Resolve the config/data dir deterministically. Some launch contexts (a
@@ -67,6 +68,78 @@ LOG_MAX_FILES=3
 FORWARD_TARGETS=127.0.0.1:20777
 `
 
+// A process launched interactively (double-clicked shortcut → cmd.exe → tsx)
+// can end up with a stale view of this file that persists for its entire
+// lifetime — confirmed in the field: such a process's own fs.readFileSync
+// consistently read back a truncated, empty-token snapshot (per fs.statSync,
+// dated to a much older mtime than the file's real one) across 20 retries
+// spanning ~4 seconds, while every check run from outside that process — a
+// separate Node invocation, PowerShell, even the same file via a different
+// path — saw the file complete and correct the entire time. This is not
+// a slow write settling; it's a per-process/session read-cache divergence
+// (root cause not fully pinned down at the OS level, despite dedicated
+// investigation) — no amount of retrying via this SAME process's own
+// fs.readFileSync ever resolved it. Spawning a fresh external reader breaks
+// out of that stale view and reliably sees the current file, so that's the
+// real fix; a short same-process retry stays first since it's cheap and
+// covers a genuine in-flight write (the mundane case this was originally
+// written for).
+// Every other field's fallback default happens to match DEFAULT_ENV's own
+// value, so this exact failure is invisible everywhere except the token,
+// which has no safe default — the agent looked "connected but never
+// connects" with zero diagnostic trace before this.
+const TOKEN_READ_RETRY_ATTEMPTS = 5
+const TOKEN_READ_RETRY_DELAY_MS = 150
+
+function syncSleep(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/** Read a file via a fresh child process rather than this process's own fs
+ *  calls — see readEnvTokenAware's comment for why that matters here. */
+function readFileViaFreshProcess(filePath: string): string | null {
+  if (process.platform !== 'win32') return null
+  try {
+    return execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', 'Get-Content -LiteralPath $args[0] -Raw', '--', filePath],
+      { encoding: 'utf8', timeout: 5000 },
+    )
+  } catch {
+    return null
+  }
+}
+
+function readEnvTokenAware(envPath: string): Record<string, string> {
+  let parsed = dotenv.parse(fs.readFileSync(envPath, 'utf8'))
+  // If the file has no PITWALL_AGENT_TOKEN key at all, that's a legitimate
+  // never-paired state — don't chase it through any of the below.
+  if (!('PITWALL_AGENT_TOKEN' in parsed) || parsed.PITWALL_AGENT_TOKEN) return parsed
+  // No app logger here yet (configureLogger() needs this function's own
+  // result first) — console.warn is the best available trace, and still
+  // beats the silent failure this replaces.
+  console.warn('[config] .env read back an empty PITWALL_AGENT_TOKEN on a non-first-run file — retrying the read')
+  for (let attempt = 1; attempt < TOKEN_READ_RETRY_ATTEMPTS; attempt++) {
+    syncSleep(TOKEN_READ_RETRY_DELAY_MS)
+    parsed = dotenv.parse(fs.readFileSync(envPath, 'utf8'))
+    if (parsed.PITWALL_AGENT_TOKEN) {
+      console.warn(`[config] .env token recovered after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`)
+      return parsed
+    }
+  }
+  console.warn('[config] same-process retries exhausted — re-reading via an external process')
+  const external = readFileViaFreshProcess(envPath)
+  if (external) {
+    const externalParsed = dotenv.parse(external)
+    if (externalParsed.PITWALL_AGENT_TOKEN) {
+      console.warn('[config] external re-read recovered the token — this process had a stale view of .env')
+      return externalParsed
+    }
+  }
+  console.warn('[config] .env token still empty after same-process retries and an external re-read — proceeding without one')
+  return parsed
+}
+
 export function loadConfig(): AgentConfig {
   // Ensure app directories exist
   fs.mkdirSync(APP_DIR, { recursive: true })
@@ -84,7 +157,10 @@ export function loadConfig(): AgentConfig {
     }
   }
 
-  dotenv.config({ path: ENV_PATH })
+  const parsed = readEnvTokenAware(ENV_PATH)
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!Object.prototype.hasOwnProperty.call(process.env, key)) process.env[key] = value
+  }
 
   const gameVersion = (process.env.GAME_VERSION ?? 'auto') as AgentConfig['gameVersion']
   return {
