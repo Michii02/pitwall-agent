@@ -82,6 +82,15 @@ export interface SessionPacket {
   airTemperature: number
   safetyCarStatus: number // 0 none, 1 full, 2 virtual, 3 formation
   sessionTimeLeft: number
+  /** m_aiDifficulty (0-110). Sits after the variable-length weather-forecast
+   *  sample array, so its byte offset depends on that array's fixed size,
+   *  which differs by game version. Only independently verified for F1 25
+   *  (offset cross-checked against this file's own already-working
+   *  safetyCarStatus offset via the official spec's cumulative field sizes)
+   *  — null for F1 23/24 and for online/network sessions where the game
+   *  may not populate it meaningfully. Never guessed for unverified
+   *  versions; see parseSession in parser.ts. */
+  aiDifficulty: number | null
 }
 
 export interface LapPacket {

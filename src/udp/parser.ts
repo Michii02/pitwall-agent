@@ -73,7 +73,7 @@ export function parsePacket(buf: Buffer, versionOverride?: GameVersion): ParseRe
   let packet: ParsedPacket | null = null
 
   switch (header.packetId) {
-    case PACKET.SESSION: packet = parseSession(buf); break
+    case PACKET.SESSION: packet = parseSession(buf, layout); break
     case PACKET.LAP_DATA: packet = parseLap(buf, p, layout); break
     case PACKET.EVENT: packet = parseEvent(buf, p); break
     case PACKET.PARTICIPANTS: packet = parseParticipant(buf, p, layout); break
@@ -94,9 +94,22 @@ export function parsePacket(buf: Buffer, versionOverride?: GameVersion): ParseRe
 
 // ── Individual packet parsers ─────────────────────────────────────────────────
 
-function parseSession(buf: Buffer): ParsedPacket | null {
+function parseSession(buf: Buffer, l: VersionLayout): ParsedPacket | null {
   if (buf.length < HEADER_SIZE + 126) return null
   const b = HEADER_SIZE
+  // m_aiDifficulty offset — verified for F1 25 only. Cumulative field sizes
+  // from the official spec (safetyCarStatus @124, +1 networkGame, +1
+  // numWeatherForecastSamples, +64*8 weatherForecastSamples, +1
+  // forecastAccuracy) land exactly on offset 640, and that same cumulative
+  // math independently reproduces this file's own already-working
+  // safetyCarStatus offset of 124 — strong corroboration. The
+  // weather-forecast array's fixed size (64 samples) has NOT been confirmed
+  // for F1 23/24, where it may differ, so aiDifficulty stays null there
+  // rather than risk misreading a different field as AI difficulty.
+  const AI_DIFFICULTY_OFFSET_F1_2025 = 640
+  const aiDifficulty = l.gameVersion === 'f1_2025' && buf.length >= b + AI_DIFFICULTY_OFFSET_F1_2025 + 1
+    ? buf.readUInt8(b + AI_DIFFICULTY_OFFSET_F1_2025)
+    : null
   return {
     kind: 'session',
     weather: buf.readUInt8(b + 0),
@@ -112,6 +125,7 @@ function parseSession(buf: Buffer): ParsedPacket | null {
     // After: pitSpeedLimit, gamePaused, isSpectating, spectatorCarIdx,
     // sliProSupport, numMarshalZones, 21×5-byte marshal zones = offset 124
     safetyCarStatus: buf.readUInt8(b + 124),
+    aiDifficulty,
   }
 }
 

@@ -67,6 +67,11 @@ export interface TelemetrySample {
   // Per-tyre surface temperature (°C) and pressure (psi), FL/FR/RL/RR.
   tS?: [number, number, number, number]
   prs?: [number, number, number, number]
+  // Per-tyre INNER (carcass) temperature (°C), FL/FR/RL/RR — same order as
+  // tS. Parsed by the UDP layer but previously dropped before reaching the
+  // collector; distinct signal from surface temp (short-term overheating
+  // effects vs longer-term carcass heat build-up).
+  tI?: [number, number, number, number]
 }
 
 export interface IncidentRecord {
@@ -95,6 +100,9 @@ export interface SessionRecord {
    *  packet's formula field, not user-selected. 'unknown' when the signal
    *  was absent or unrecognised; never guessed. */
   vehicle_era: VehicleEra
+  /** m_aiDifficulty (0-110), F1 25 only — see SessionPacket.aiDifficulty for
+   *  why F1 23/24 always resolve to null. Never a guessed value. */
+  ai_difficulty: number | null
   track_id: number
   track_name: string
   session_type: string
@@ -154,6 +162,7 @@ export class SessionCollector {
   private currentErsStore: number | null = null   // 0..1
   private currentErsMode: number | null = null
   private currentTyreTemp: [number, number, number, number] | null = null
+  private currentTyreInnerTemp: [number, number, number, number] | null = null
   private currentTyrePressure: [number, number, number, number] | null = null
   private currentCarPosition: number | null = null
   private lastLapEndPosition: number | null = null
@@ -172,6 +181,7 @@ export class SessionCollector {
       source: 'udp_agent',
       game_version: gameVersion,
       vehicle_era: deriveVehicleEra(session.formula),
+      ai_difficulty: session.aiDifficulty,
       track_id: session.trackId,
       track_name: TRACK_NAMES[session.trackId] ?? `Track ${session.trackId}`,
       session_type: SESSION_TYPE_NAMES[session.sessionType] ?? 'unknown',
@@ -216,6 +226,11 @@ export class SessionCollector {
     // known value, keep the improved read rather than freezing on the
     // constructor's first (possibly stale/corrupt) sample.
     if (this.record.vehicle_era === 'unknown') this.record.vehicle_era = deriveVehicleEra(s.formula)
+    // Same don't-clobber-a-good-read rule as vehicle_era: AI difficulty is
+    // set once from the first packet that resolves it, never overwritten by
+    // a later null (which would happen for every non-F1-25 packet since
+    // parseSession only ever resolves it for that one verified version).
+    if (this.record.ai_difficulty == null && s.aiDifficulty != null) this.record.ai_difficulty = s.aiDifficulty
     const scNow = s.safetyCarStatus > 0
     if (scNow && !this.safetyCarActive) log.info(`Safety car status → ${s.safetyCarStatus}`)
     this.safetyCarActive = scNow
@@ -310,6 +325,9 @@ export class SessionCollector {
     // Keep the latest tyre temps/pressures for the next sample + lap aggregation.
     if (t.tyreSurfaceTemp) {
       this.currentTyreTemp = [t.tyreSurfaceTemp.fl, t.tyreSurfaceTemp.fr, t.tyreSurfaceTemp.rl, t.tyreSurfaceTemp.rr]
+    }
+    if (t.tyreInnerTemp) {
+      this.currentTyreInnerTemp = [t.tyreInnerTemp.fl, t.tyreInnerTemp.fr, t.tyreInnerTemp.rl, t.tyreInnerTemp.rr]
     }
     if (t.tyrePressure) {
       this.currentTyrePressure = [t.tyrePressure.fl, t.tyrePressure.fr, t.tyrePressure.rl, t.tyrePressure.rr]
