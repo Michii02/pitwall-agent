@@ -10,6 +10,8 @@ import {
   HEADER_SIZE, OFF_PACKET_FORMAT, OFF_PACKET_ID, OFF_SESSION_UID_LO, OFF_PLAYER_CAR_INDEX,
   PACKET, playerOffset, tyreArray,
   type ParsedHeader, type ParsedPacket, type VersionLayout, type GameVersion,
+  type ParticipantPacket, type LapPacket, type ClassificationPacket,
+  type ParticipantGridEntry, type LapGridEntry, type ClassificationGridEntry,
 } from './packets/common'
 import { F1_2023 } from './packets/f1-2023'
 import { F1_2024 } from './packets/f1-2024'
@@ -74,15 +76,34 @@ export function parsePacket(buf: Buffer, versionOverride?: GameVersion): ParseRe
 
   switch (header.packetId) {
     case PACKET.SESSION: packet = parseSession(buf, layout); break
-    case PACKET.LAP_DATA: packet = parseLap(buf, p, layout); break
+    case PACKET.LAP_DATA:
+      packet = parseLap(buf, p, layout) // unchanged — player slot only
+      // Race Grid Intelligence (additive): attach every car's Lap Data onto
+      // the same packet object, never altering the player-scoped fields above.
+      if (packet) (packet as LapPacket).grid = parseLapDataGrid(buf, layout) ?? undefined
+      break
     case PACKET.EVENT: packet = parseEvent(buf, p); break
-    case PACKET.PARTICIPANTS: packet = parseParticipant(buf, p, layout); break
+    case PACKET.PARTICIPANTS:
+      packet = parseParticipant(buf, p, layout) // unchanged — player slot only
+      if (packet) (packet as ParticipantPacket).grid = parseParticipantsGrid(buf, layout) ?? undefined
+      break
     case PACKET.CAR_SETUPS: packet = parseSetup(buf, p, layout); break
     case PACKET.CAR_TELEMETRY: packet = parseCarTelemetry(buf, p); break
     case PACKET.CAR_STATUS: packet = parseStatus(buf, p, layout); break
-    case PACKET.FINAL_CLASSIFICATION: packet = parseClassification(buf, p, layout); break
+    case PACKET.FINAL_CLASSIFICATION:
+      packet = parseClassification(buf, p, layout) // unchanged — player slot only
+      if (packet) (packet as ClassificationPacket).grid = parseClassificationGrid(buf, layout) ?? undefined
+      break
     case PACKET.CAR_DAMAGE: packet = parseDamage(buf, p, layout); break
-    case PACKET.SESSION_HISTORY: packet = parseHistory(buf, p, layout); break
+    case PACKET.SESSION_HISTORY:
+      // unchanged for the player's own car (parseHistory); Session History
+      // broadcasts one packet per car per cycle, and every non-player packet
+      // was previously discarded entirely (parseHistory returns null for
+      // carIdx !== p) — Race Grid Intelligence routes those previously-dead
+      // packets to a new sibling kind instead of dropping them, never
+      // altering what the player's own packets resolve to.
+      packet = parseHistory(buf, p, layout) ?? parseHistoryAnyCar(buf, p, layout)
+      break
     case PACKET.TYRE_SETS: packet = layout.hasTyreSets ? parseTyreSets(buf, layout) : null; break
     // MOTION (0), LOBBY_INFO (9): intentionally skipped
     default: packet = null
@@ -154,6 +175,39 @@ function parseLap(buf: Buffer, p: number, l: VersionLayout): ParsedPacket | null
   }
 }
 
+/**
+ * Race Grid Intelligence (Phase 1): every car's Lap Data, not just the
+ * player's — reuses the exact same offsets as parseLap above (proven in
+ * production for the player's own car), applied per vehicle slot 0..21.
+ * Lap Data has no leading count byte (unlike Participants/Classification),
+ * so this is a fixed 22-slot loop, each guarded by a length check.
+ */
+function parseLapDataGrid(buf: Buffer, l: VersionLayout): LapGridEntry[] | null {
+  const entries: LapGridEntry[] = []
+  for (let i = 0; i < 22; i++) {
+    const base = playerOffset(i, l.lapDataSize)
+    if (buf.length < base + l.lapDataSize) break
+    const sectorMs = (msOff: number, minOff: number) =>
+      buf.readUInt16LE(base + msOff) + buf.readUInt8(base + minOff) * 60_000
+    entries.push({
+      vehicleIndex: i,
+      lastLapMs: buf.readUInt32LE(base + 0),
+      currentLapMs: buf.readUInt32LE(base + 4),
+      sector1Ms: sectorMs(8, 10),
+      sector2Ms: sectorMs(11, 13),
+      carPosition: buf.readUInt8(base + 32),
+      lapNumber: buf.readUInt8(base + 33),
+      pitStatus: buf.readUInt8(base + 34),
+      numPitStops: buf.readUInt8(base + 35),
+      lapInvalid: buf.readUInt8(base + 37) === 1,
+      driverStatus: buf.readUInt8(base + 44),
+      resultStatus: buf.readUInt8(base + 45),
+      gridPosition: buf.readUInt8(base + 43),
+    })
+  }
+  return entries.length > 0 ? entries : null
+}
+
 function parseEvent(buf: Buffer, playerIdx: number): ParsedPacket | null {
   if (buf.length < HEADER_SIZE + 4) return null
   const code = buf.toString('ascii', HEADER_SIZE, HEADER_SIZE + 4)
@@ -194,6 +248,41 @@ function parseParticipant(buf: Buffer, p: number, l: VersionLayout): ParsedPacke
   const raw = buf.toString('utf8', nameStart, nameEnd)
   const driverName = raw.split('\0')[0].trim() || 'Player'
   return { kind: 'participant', driverName, teamId, raceNumber }
+}
+
+/**
+ * Race Grid Intelligence (Phase 1): every car's Participants data, not just
+ * the player's. Reuses the exact struct layout already proven by
+ * parseParticipant above (teamId@3, raceNumber@5, name@7). aiControlled(@0)/
+ * networkId(@2)/nationality(@6) and platform(@43) are independently
+ * cross-checked against MacManley/f1-25-udp's published F1 25 struct and are
+ * only populated for f1_2025 — left null for F1 23/24, which were not
+ * independently re-verified for this field set (same discipline as
+ * aiDifficulty's F1-25-only gate in the Session packet).
+ */
+function parseParticipantsGrid(buf: Buffer, l: VersionLayout): ParticipantGridEntry[] | null {
+  if (buf.length < HEADER_SIZE + 1) return null
+  const numActiveCars = Math.min(buf.readUInt8(HEADER_SIZE), 22)
+  const verified = l.gameVersion === 'f1_2025'
+  const entries: ParticipantGridEntry[] = []
+  for (let i = 0; i < numActiveCars; i++) {
+    const base = HEADER_SIZE + 1 + i * l.participantSize
+    if (buf.length < base + l.participantSize) break
+    const teamId = buf.readUInt8(base + 3)
+    const raceNumber = buf.readUInt8(base + 5)
+    const nameStart = base + 7
+    const nameEnd = Math.min(nameStart + 32, buf.length)
+    const raw = buf.toString('utf8', nameStart, nameEnd)
+    const driverName = raw.split('\0')[0].trim() || 'Player'
+    entries.push({
+      vehicleIndex: i, driverName, teamId, raceNumber,
+      aiControlled: verified ? buf.readUInt8(base + 0) === 1 : null,
+      networkId: verified ? buf.readUInt8(base + 2) : null,
+      nationality: verified ? buf.readUInt8(base + 6) : null,
+      platform: verified && buf.length >= base + 44 ? buf.readUInt8(base + 43) : null,
+    })
+  }
+  return entries
 }
 
 function parseSetup(buf: Buffer, p: number, l: VersionLayout): ParsedPacket | null {
@@ -327,6 +416,45 @@ function parseClassification(buf: Buffer, p: number, l: VersionLayout): ParsedPa
   }
 }
 
+/**
+ * Race Grid Intelligence (Phase 1): every car's Final Classification, not
+ * just the player's. Unlike parseClassification above, this applies the
+ * F1-25-only +1 byte shift for m_resultReason (inserted right after
+ * m_resultStatus — independently confirmed against MacManley/f1-25-udp's
+ * published struct, and matches finalClassificationSize growing 45→46 bytes
+ * exactly for F1 25). position/numLaps/gridPosition/resultStatus sit before
+ * the inserted byte and are unaffected either way.
+ *
+ * NOTE: parseClassification above does NOT apply this shift, so for F1 25
+ * sessions specifically its bestLapTimeMs/totalRaceTimeSec/penaltiesTimeSec
+ * reads are off by one byte — harmless today because collector.ts's
+ * applyClassification() never reads those 3 fields, only position/
+ * gridPosition/resultStatus (which are correct). Flagged here rather than
+ * silently fixed in place, since correcting the existing single-car function
+ * is out of scope for this additive-only phase.
+ */
+function parseClassificationGrid(buf: Buffer, l: VersionLayout): ClassificationGridEntry[] | null {
+  if (buf.length < HEADER_SIZE + 1) return null
+  const numCars = Math.min(buf.readUInt8(HEADER_SIZE), 22)
+  const shift = l.gameVersion === 'f1_2025' ? 1 : 0
+  const entries: ClassificationGridEntry[] = []
+  for (let i = 0; i < numCars; i++) {
+    const base = HEADER_SIZE + 1 + i * l.finalClassificationSize
+    if (buf.length < base + l.finalClassificationSize) break
+    entries.push({
+      vehicleIndex: i,
+      position: buf.readUInt8(base + 0),
+      numLaps: buf.readUInt8(base + 1),
+      gridPosition: buf.readUInt8(base + 2),
+      resultStatus: buf.readUInt8(base + 5),
+      bestLapTimeMs: buf.readUInt32LE(base + 6 + shift),
+      totalRaceTimeSec: buf.readDoubleLE(base + 10 + shift),
+      penaltiesTimeSec: buf.readUInt8(base + 18 + shift),
+    })
+  }
+  return entries
+}
+
 function parseHistory(buf: Buffer, p: number, l: VersionLayout): ParsedPacket | null {
   const b = HEADER_SIZE
   if (buf.length < b + 7) return null
@@ -360,6 +488,48 @@ function parseHistory(buf: Buffer, p: number, l: VersionLayout): ParsedPacket | 
     laps.push({ lapTimeMs, sector1Ms, sector2Ms, sector3Ms, valid })
   }
   return { kind: 'history', carIdx, numLaps, bestLapNumber, bestS1Lap, bestS2Lap, bestS3Lap, laps }
+}
+
+/**
+ * Race Grid Intelligence (Phase 1): Session History for a car other than the
+ * player. Session History broadcasts one packet per car per cycle, and
+ * parseHistory above returns null whenever carIdx !== p (previously always
+ * discarded, silently) — this sibling function is identical parsing logic
+ * with that player-only gate removed, used only as a fallback when
+ * parseHistory itself returned null (see parsePacket's SESSION_HISTORY case).
+ */
+function parseHistoryAnyCar(buf: Buffer, p: number, l: VersionLayout): ParsedPacket | null {
+  const b = HEADER_SIZE
+  if (buf.length < b + 7) return null
+  const carIdx = buf.readUInt8(b + 0)
+  if (carIdx === p) return null // player's own — parseHistory already handled it
+  const numLaps = buf.readUInt8(b + 1)
+  const bestLapNumber = buf.readUInt8(b + 3)
+  const bestS1Lap = buf.readUInt8(b + 4)
+  const bestS2Lap = buf.readUInt8(b + 5)
+  const bestS3Lap = buf.readUInt8(b + 6)
+  const entriesStart = b + 7
+  const laps = []
+  for (let i = 0; i < Math.min(numLaps, 100); i++) {
+    const e = entriesStart + i * l.lapHistorySize
+    if (buf.length < e + l.lapHistorySize) break
+    const lapTimeMs = buf.readUInt32LE(e + 0)
+    let sector1Ms: number, sector2Ms: number, sector3Ms: number, validOff: number
+    if (l.historyHasMinutes) {
+      sector1Ms = buf.readUInt16LE(e + 4) + buf.readUInt8(e + 6) * 60_000
+      sector2Ms = buf.readUInt16LE(e + 7) + buf.readUInt8(e + 9) * 60_000
+      sector3Ms = buf.readUInt16LE(e + 10) + buf.readUInt8(e + 12) * 60_000
+      validOff = 13
+    } else {
+      sector1Ms = buf.readUInt16LE(e + 4)
+      sector2Ms = buf.readUInt16LE(e + 6)
+      sector3Ms = buf.readUInt16LE(e + 8)
+      validOff = 10
+    }
+    const valid = (buf.readUInt8(e + validOff) & 0x01) === 0x01
+    laps.push({ lapTimeMs, sector1Ms, sector2Ms, sector3Ms, valid })
+  }
+  return { kind: 'historyGrid', carIdx, numLaps, bestLapNumber, bestS1Lap, bestS2Lap, bestS3Lap, laps }
 }
 
 function parseTyreSets(buf: Buffer, l: VersionLayout): ParsedPacket | null {

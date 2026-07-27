@@ -109,6 +109,28 @@ export interface LapPacket {
   numPitStops: number
   sector: number // 0=S1, 1=S2, 2=S3 — which sector the car is currently in
   lapDistance: number // metres travelled around the current lap
+  /** Race Grid Intelligence: every car in this packet — see
+   *  parseLapDataGrid in parser.ts. Optional/additive. */
+  grid?: LapGridEntry[]
+}
+
+/** One car's Lap Data-packet fields, for the Race Grid Intelligence
+ *  multi-car capture (Phase 1) — same offsets as the already-proven
+ *  single-car parseLap, just applied per vehicle slot. */
+export interface LapGridEntry {
+  vehicleIndex: number
+  lastLapMs: number
+  currentLapMs: number
+  sector1Ms: number
+  sector2Ms: number
+  carPosition: number
+  lapNumber: number
+  pitStatus: number
+  numPitStops: number
+  lapInvalid: boolean
+  driverStatus: number
+  resultStatus: number
+  gridPosition: number
 }
 
 export interface EventPacket {
@@ -129,6 +151,27 @@ export interface ParticipantPacket {
   driverName: string
   teamId: number
   raceNumber: number
+  /** Race Grid Intelligence: every car in this packet, not just the player's
+   *  own slot — see parseParticipantsGrid in parser.ts. Optional/additive;
+   *  existing consumers of driverName/teamId/raceNumber are unaffected. */
+  grid?: ParticipantGridEntry[]
+}
+
+/** One car's Participants-packet data, for the Race Grid Intelligence
+ *  multi-car capture (Phase 1). aiControlled/networkId/nationality are
+ *  independently verified for F1 25 only (cross-checked against
+ *  MacManley/f1-25-udp's published struct, corroborating this file's
+ *  already-proven teamId@3/raceNumber@5 offsets) — null for F1 23/24.
+ *  platform is likewise F1-25-only-verified (offset 43); null elsewhere. */
+export interface ParticipantGridEntry {
+  vehicleIndex: number
+  driverName: string
+  teamId: number
+  raceNumber: number
+  aiControlled: boolean | null
+  networkId: number | null
+  nationality: number | null
+  platform: number | null
 }
 
 export interface SetupPacket {
@@ -206,6 +249,29 @@ export interface ClassificationPacket {
   bestLapTimeMs: number
   totalRaceTimeSec: number
   penaltiesTimeSec: number
+  /** Race Grid Intelligence: every car in this packet — see
+   *  parseClassificationGrid in parser.ts. Optional/additive. */
+  grid?: ClassificationGridEntry[]
+}
+
+/** One car's Final Classification-packet fields, for the Race Grid
+ *  Intelligence multi-car capture (Phase 1). Unlike the single-car
+ *  parseClassification above, this applies the F1-25-only +1 byte shift
+ *  (m_resultReason, inserted right after m_resultStatus — independently
+ *  confirmed against MacManley/f1-25-udp's published struct, and matches
+ *  finalClassificationSize growing 45→46 bytes exactly for F1 25) so
+ *  bestLapTimeMs/totalRaceTimeSec/penaltiesTimeSec read correctly for F1 25.
+ *  position/numLaps/gridPosition/resultStatus are unaffected (they sit
+ *  before the inserted byte) — see parseClassificationGrid for detail. */
+export interface ClassificationGridEntry {
+  vehicleIndex: number
+  position: number
+  numLaps: number
+  gridPosition: number
+  resultStatus: number
+  bestLapTimeMs: number
+  totalRaceTimeSec: number
+  penaltiesTimeSec: number
 }
 
 export interface HistoryLapEntry {
@@ -227,6 +293,22 @@ export interface HistoryPacket {
   laps: HistoryLapEntry[]
 }
 
+/** Race Grid Intelligence: Session History for a car OTHER than the player
+ *  (the single-car 'history' kind above already covers the player's own —
+ *  this is a distinct kind, not a modification of it, emitted only for the
+ *  previously-always-discarded non-player packets). Same fields/parsing as
+ *  HistoryPacket, see parseHistoryAnyCar in parser.ts. */
+export interface HistoryGridPacket {
+  kind: 'historyGrid'
+  carIdx: number
+  numLaps: number
+  bestLapNumber: number
+  bestS1Lap: number
+  bestS2Lap: number
+  bestS3Lap: number
+  laps: HistoryLapEntry[]
+}
+
 export interface TyreSetsPacket {
   kind: 'tyreSets'
   fittedIdx: number
@@ -236,7 +318,7 @@ export interface TyreSetsPacket {
 export type ParsedPacket =
   | SessionPacket | LapPacket | EventPacket | ParticipantPacket | SetupPacket
   | StatusPacket | DamagePacket | ClassificationPacket | HistoryPacket | TyreSetsPacket
-  | CarTelemetryPacket
+  | CarTelemetryPacket | HistoryGridPacket
 
 // ── Lookup tables ─────────────────────────────────────────────────────────────
 

@@ -75,6 +75,11 @@ export class SessionLifecycle {
     // Any packet flow while idle means the game is running
     if (this.state === 'IDLE') this.setState('CONNECTED')
 
+    // Race Grid Intelligence (additive): keep the collector's own record of
+    // which vehicle slot is the player's up to date — self-correcting, every
+    // packet carries it in the header.
+    this.collector?.updatePlayerVehicleIndex(result.header.playerCarIndex)
+
     const pkt = result.packet
     switch (pkt.kind) {
       case 'session': {
@@ -117,6 +122,10 @@ export class SessionLifecycle {
                    (pkt.vehicleIdx === player || pkt.otherVehicleIdx === player)) {
           this.collector.recordCollision()
         }
+        // Race Grid Intelligence (additive): capture penalty/collision events
+        // for every car, independent of the player-only branch above.
+        if (pkt.code === 'PENA' && this.collector) this.collector.recordAnyCarPenalty(pkt)
+        else if (pkt.code === 'COLL' && this.collector) this.collector.recordAnyCarCollision(pkt)
         break
       }
 
@@ -125,6 +134,9 @@ export class SessionLifecycle {
         if (!this.collector && this.state !== 'SYNCING' && this.state !== 'SESSION_ENDING') {
           if (pkt.driverStatus > 0 || pkt.currentLapMs > 0) this.startSession('lap data flow')
         }
+        // Race Grid Intelligence (additive): keep the latest full-grid Lap
+        // Data snapshot fresh, used at each lap boundary inside updateLap.
+        if (pkt.grid) this.collector?.updateLapDataGridSnapshot(pkt.grid)
         if (this.collector && this.state === 'SESSION_ACTIVE') {
           const completed = this.collector.updateLap(pkt)
           if (completed) {
@@ -140,6 +152,8 @@ export class SessionLifecycle {
 
       case 'participant':
         this.collector?.updateParticipant(pkt.driverName, pkt.teamId, pkt.raceNumber)
+        // Race Grid Intelligence (additive)
+        if (pkt.grid) this.collector?.updateParticipantsGrid(pkt.grid)
         break
       case 'setup':
         this.collector?.updateSetup(pkt)
@@ -156,11 +170,19 @@ export class SessionLifecycle {
       case 'classification':
         if (this.collector) {
           this.collector.applyClassification(pkt)
+          // Race Grid Intelligence (additive)
+          if (pkt.grid) this.collector.applyClassificationGrid(pkt.grid)
           this.endSession(false)
         }
         break
       case 'history':
         this.collector?.applyHistory(pkt)
+        break
+      case 'historyGrid':
+        // Race Grid Intelligence (additive) — Session History for a car
+        // other than the player, previously always discarded (see
+        // parseHistoryAnyCar in parser.ts).
+        this.collector?.applyHistoryGrid(pkt)
         break
       case 'tyreSets':
         // Currently informational only

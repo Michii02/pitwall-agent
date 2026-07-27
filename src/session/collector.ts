@@ -11,6 +11,7 @@ import {
   type GameVersion, type SessionPacket, type LapPacket, type SetupPacket,
   type StatusPacket, type DamagePacket, type ClassificationPacket, type HistoryPacket,
   type EventPacket, type CarTelemetryPacket,
+  type ParticipantGridEntry, type LapGridEntry, type ClassificationGridEntry, type HistoryGridPacket,
 } from '../udp/packets/common'
 import { deriveVehicleEra, type VehicleEra } from './vehicleEra'
 import { log, fmtLapTime, fmtSector } from '../utils/logger'
@@ -92,6 +93,57 @@ export interface DamageRecord {
   engine: number
 }
 
+// ── Race Grid Intelligence (Phase 1) records ────────────────────────────────
+// All new/optional — SessionRecord's existing player-scoped fields above are
+// untouched by any of this. Identity churn (a driver leaving, another
+// joining the same car slot) is captured last-write-wins, matching how every
+// existing per-car field in this file already behaves (e.g. player_team).
+
+export interface ParticipantGridRecord {
+  vehicle_index: number
+  driver_name: string
+  team_id: number
+  race_number: number
+  ai_controlled: boolean | null
+  network_id: number | null
+  nationality: number | null
+  platform: number | null
+}
+
+export interface ClassificationGridRecord {
+  vehicle_index: number
+  position: number
+  num_laps: number
+  grid_position: number
+  result_status: number
+  best_lap_time_ms: number
+  total_race_time_sec: number
+  penalties_time_sec: number
+}
+
+export interface OpponentHistoryRecord {
+  car_idx: number
+  num_laps: number
+  best_lap_number: number
+  best_s1_lap: number
+  best_s2_lap: number
+  best_s3_lap: number
+  laps: { lap_time_ms: number; sector_1_ms: number; sector_2_ms: number; sector_3_ms: number; valid: boolean }[]
+}
+
+export interface ParticipantIncidentRecord {
+  vehicle_index: number
+  lap_number: number | null
+  type: 'Penalty' | 'Collision' | 'Track Limits' | 'Other'
+  description: string
+  time_lost: number | null
+}
+
+export interface GridPositionSnapshot {
+  lap_number: number
+  positions: { vehicle_index: number; car_position: number; driver_status: number; result_status: number }[]
+}
+
 export interface SessionRecord {
   id: string
   source: 'udp_agent'
@@ -133,6 +185,14 @@ export interface SessionRecord {
   damage_log: DamageRecord[]
   incidents: IncidentRecord[]
   telemetry_samples: TelemetrySample[]
+  // Race Grid Intelligence (Phase 1) — all optional/additive, never read by
+  // any existing consumer of this record.
+  player_vehicle_index?: number
+  participants_grid?: ParticipantGridRecord[]
+  participants_classification?: ClassificationGridRecord[]
+  opponent_history?: Record<number, OpponentHistoryRecord>
+  participant_incidents?: ParticipantIncidentRecord[]
+  grid_position_history?: GridPositionSnapshot[]
 }
 
 type Wear = { fl: number; fr: number; rl: number; rr: number }
@@ -174,6 +234,9 @@ export class SessionCollector {
   private stintStartLap = 1
   private stintStartWear: Wear | null = null
   private lastDamageLogLap = 0
+  // Race Grid Intelligence (Phase 1) — latest full-grid Lap Data snapshot,
+  // used to build a per-lap-boundary position-history entry (see updateLap).
+  private latestLapGrid: LapGridEntry[] | null = null
 
   constructor(gameVersion: GameVersion, session: SessionPacket) {
     this.record = {
@@ -241,6 +304,103 @@ export class SessionCollector {
     this.record.player_team = TEAM_NAMES[teamId] ?? `Team ${teamId}`
     this.record.player_car_number = raceNumber
     void name // driver name lives in the PitWall driver profile, not the session
+  }
+
+  // ── Race Grid Intelligence (Phase 1) feeds ──────────────────────────────
+  // All additive — none of the methods above are modified or called from here.
+
+  /** Refreshed from every packet's header — self-correcting, no staleness risk. */
+  updatePlayerVehicleIndex(idx: number): void {
+    this.record.player_vehicle_index = idx
+  }
+
+  /** Full replace, last-write-wins per vehicle slot (matches updateParticipant's
+   *  own last-write-wins behavior for the player's own car). */
+  updateParticipantsGrid(entries: ParticipantGridEntry[]): void {
+    this.record.participants_grid = entries.map((e) => ({
+      vehicle_index: e.vehicleIndex,
+      driver_name: e.driverName,
+      team_id: e.teamId,
+      race_number: e.raceNumber,
+      ai_controlled: e.aiControlled,
+      network_id: e.networkId,
+      nationality: e.nationality,
+      platform: e.platform,
+    }))
+  }
+
+  /** Stores the latest full-grid Lap Data snapshot only — read by updateLap
+   *  at each lap boundary to build a bounded grid_position_history entry. */
+  updateLapDataGridSnapshot(entries: LapGridEntry[]): void {
+    this.latestLapGrid = entries
+  }
+
+  /** Full replace — Final Classification broadcasts a complete snapshot. */
+  applyClassificationGrid(entries: ClassificationGridEntry[]): void {
+    this.record.participants_classification = entries.map((e) => ({
+      vehicle_index: e.vehicleIndex,
+      position: e.position,
+      num_laps: e.numLaps,
+      grid_position: e.gridPosition,
+      result_status: e.resultStatus,
+      best_lap_time_ms: e.bestLapTimeMs,
+      total_race_time_sec: e.totalRaceTimeSec,
+      penalties_time_sec: e.penaltiesTimeSec,
+    }))
+  }
+
+  /** Full replace per carIdx key — each car's Session History broadcast is
+   *  itself cumulative, so replace-not-merge is correct and simplest. */
+  applyHistoryGrid(pkt: HistoryGridPacket): void {
+    if (!this.record.opponent_history) this.record.opponent_history = {}
+    this.record.opponent_history[pkt.carIdx] = {
+      car_idx: pkt.carIdx,
+      num_laps: pkt.numLaps,
+      best_lap_number: pkt.bestLapNumber,
+      best_s1_lap: pkt.bestS1Lap,
+      best_s2_lap: pkt.bestS2Lap,
+      best_s3_lap: pkt.bestS3Lap,
+      laps: pkt.laps.map((l) => ({
+        lap_time_ms: l.lapTimeMs, sector_1_ms: l.sector1Ms, sector_2_ms: l.sector2Ms,
+        sector_3_ms: l.sector3Ms, valid: l.valid,
+      })),
+    }
+  }
+
+  /** Penalty/collision events for ANY car, independent of the player-only
+   *  recordPenalty/recordCollision above (which stay unchanged and keep
+   *  feeding record.incidents for backward compatibility). */
+  recordAnyCarPenalty(evt: EventPacket): void {
+    if (evt.vehicleIdx == null) return
+    const ptype = PENALTY_TYPE_NAMES[evt.penaltyType ?? -1] ?? 'Penalty'
+    const infr = INFRINGEMENT_NAMES[evt.infringementType ?? -1] ?? 'infringement'
+    const lap = evt.lapNum ?? this.currentLap
+    const isWarning = evt.penaltyType === 5
+    const isTrackLimits = (evt.infringementType ?? -1) >= 25 && (evt.infringementType ?? -1) <= 29
+    const time = evt.penaltyTime && evt.penaltyTime > 0 && evt.penaltyType === 4 ? evt.penaltyTime : null
+    const type = isTrackLimits ? 'Track Limits' : 'Penalty'
+    const desc = isWarning ? `Warning — ${infr}` : `${ptype} — ${infr}${time ? ` (+${time}s)` : ''}`
+    this.addParticipantIncident(evt.vehicleIdx, type, desc, lap, time)
+  }
+
+  recordAnyCarCollision(evt: EventPacket): void {
+    const lap = this.currentLap
+    for (const vehicleIndex of [evt.vehicleIdx, evt.otherVehicleIdx]) {
+      if (vehicleIndex == null) continue
+      this.addParticipantIncident(vehicleIndex, 'Collision', 'Collision with another car', lap)
+    }
+  }
+
+  private addParticipantIncident(
+    vehicleIndex: number, type: ParticipantIncidentRecord['type'],
+    description: string, lapNumber: number | null, timeLost: number | null = null,
+  ): void {
+    if (!this.record.participant_incidents) this.record.participant_incidents = []
+    const dup = this.record.participant_incidents.some(
+      (i) => i.vehicle_index === vehicleIndex && i.lap_number === lapNumber && i.description === description,
+    )
+    if (dup) return
+    this.record.participant_incidents.push({ vehicle_index: vehicleIndex, lap_number: lapNumber, type, description, time_lost: timeLost })
   }
 
   updateSetup(setup: SetupPacket): void {
@@ -454,6 +614,23 @@ export class SessionCollector {
       this.sector2Ms = null
       this.safetyCarThisLap = this.safetyCarActive // carries over if SC still out
       completed = true
+
+      // Race Grid Intelligence (additive): snapshot the grid's positions at
+      // this lap boundary from the latest full-grid Lap Data packet seen —
+      // bounded to roughly one entry per player lap, same order of
+      // magnitude as record.laps.
+      if (this.latestLapGrid) {
+        if (!this.record.grid_position_history) this.record.grid_position_history = []
+        this.record.grid_position_history.push({
+          lap_number: rec.lap_number,
+          positions: this.latestLapGrid.map((g) => ({
+            vehicle_index: g.vehicleIndex,
+            car_position: g.carPosition,
+            driver_status: g.driverStatus,
+            result_status: g.resultStatus,
+          })),
+        })
+      }
     }
 
     // DNF detection from result status (4 = dnf, 5 = dsq, 6 = not classified, 7 = retired)
