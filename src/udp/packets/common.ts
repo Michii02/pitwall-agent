@@ -131,6 +131,20 @@ export interface LapGridEntry {
   driverStatus: number
   resultStatus: number
   gridPosition: number
+  // Race Context Intelligence: m_lapDistance reuses the exact offset already
+  // proven by the player-only parseLap() above (that function reads it
+  // unconditionally on every game version) — zero new offset risk, just never
+  // carried into this all-car loop before now.
+  lapDistance: number
+  // Race Context Intelligence: m_totalDistance, m_deltaToCarInFrontInMS,
+  // m_deltaToRaceLeaderInMS — none of these were ever read anywhere before
+  // now, for any car. Corroborated only by cumulative struct-size arithmetic
+  // (offsets bracketed by four independently-proven fields) for the 57-byte
+  // F1 24/25 Lap Data struct — null on F1 23's smaller, unverified-at-these-
+  // offsets struct, same discipline as aiDifficulty's version gating.
+  totalDistance: number | null
+  gapAheadMs: number | null
+  gapToLeaderMs: number | null
 }
 
 export interface EventPacket {

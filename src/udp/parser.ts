@@ -184,6 +184,11 @@ function parseLap(buf: Buffer, p: number, l: VersionLayout): ParsedPacket | null
  */
 function parseLapDataGrid(buf: Buffer, l: VersionLayout): LapGridEntry[] | null {
   const entries: LapGridEntry[] = []
+  // Race Context Intelligence: m_deltaToCarInFrontInMS/m_deltaToRaceLeaderInMS
+  // are only verified at these offsets for the 57-byte F1 24/25 struct — F1
+  // 23's struct is 4 bytes smaller and unverified here, so those two fields
+  // stay null rather than risk a guessed offset on the older layout.
+  const gapFieldsVerified = l.lapDataSize === 57
   for (let i = 0; i < 22; i++) {
     const base = playerOffset(i, l.lapDataSize)
     if (buf.length < base + l.lapDataSize) break
@@ -203,10 +208,25 @@ function parseLapDataGrid(buf: Buffer, l: VersionLayout): LapGridEntry[] | null 
       driverStatus: buf.readUInt8(base + 44),
       resultStatus: buf.readUInt8(base + 45),
       gridPosition: buf.readUInt8(base + 43),
+      // Race Context Intelligence — additive, see LapGridEntry's doc comment:
+      lapDistance: buf.readFloatLE(base + 20),
+      totalDistance: gapFieldsVerified ? buf.readFloatLE(base + 24) : null,
+      gapAheadMs: gapFieldsVerified ? sectorMs(14, 16) : null,
+      gapToLeaderMs: gapFieldsVerified ? sectorMs(17, 19) : null,
     })
+  }
+  // One-time diagnostic so a real F1 24/25 session confirms the new offsets
+  // (lapDistance/totalDistance/gapAheadMs/gapToLeaderMs) look plausible in
+  // production before Race Context Intelligence trusts them non-null.
+  if (!loggedLapGridFields && entries.length > 0) {
+    loggedLapGridFields = true
+    const e = entries[0]
+    log.info(`[diag] LapDataGrid car0 lapDistance=${e.lapDistance.toFixed(1)} totalDistance=${e.totalDistance?.toFixed(1) ?? 'null'} gapAheadMs=${e.gapAheadMs} gapToLeaderMs=${e.gapToLeaderMs} gapFieldsVerified=${gapFieldsVerified}`)
   }
   return entries.length > 0 ? entries : null
 }
+
+let loggedLapGridFields = false
 
 function parseEvent(buf: Buffer, playerIdx: number): ParsedPacket | null {
   if (buf.length < HEADER_SIZE + 4) return null

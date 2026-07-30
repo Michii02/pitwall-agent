@@ -144,6 +144,23 @@ export interface GridPositionSnapshot {
   positions: { vehicle_index: number; car_position: number; driver_status: number; result_status: number }[]
 }
 
+// Race Context Intelligence: a bounded, all-car distance/gap snapshot sampled
+// periodically throughout the session — distinct from GridPositionSnapshot
+// above (which is classification-order only, once per PLAYER lap completion,
+// and must stay unmodified since raceStory.ts already depends on its shape).
+// `t` uses the same "ms since session start" epoch as TelemetrySample.t, so
+// the two streams are natively joinable server-side.
+export interface ProximitySnapshot {
+  t: number
+  cars: {
+    vehicle_index: number
+    car_position: number
+    lap_number: number
+    total_distance: number | null
+    gap_ahead_ms: number | null
+  }[]
+}
+
 export interface SessionRecord {
   id: string
   source: 'udp_agent'
@@ -193,6 +210,8 @@ export interface SessionRecord {
   opponent_history?: Record<number, OpponentHistoryRecord>
   participant_incidents?: ParticipantIncidentRecord[]
   grid_position_history?: GridPositionSnapshot[]
+  // Race Context Intelligence — additive, see ProximitySnapshot's doc comment.
+  proximity_snapshots?: ProximitySnapshot[]
 }
 
 type Wear = { fl: number; fr: number; rl: number; rr: number }
@@ -202,6 +221,12 @@ const DAMAGE_LOG_INTERVAL = 5 // laps
 // hard-cap the total so a long race can't produce an unbounded payload.
 const SAMPLE_INTERVAL_MS = 200        // ~5 Hz — plenty for a throttle/brake trace
 const MAX_SAMPLES = 6000              // ~20 min at 5 Hz; older ones are thinned
+// Race Context Intelligence: all-car proximity is far larger per-sample (up to
+// 22 cars) than the player's own single-car telemetry sample, so this is
+// throttled much coarser — 2s is still frequent enough for hysteresis-debounced
+// state classification, while keeping a long race's payload bounded.
+const PROXIMITY_SAMPLE_INTERVAL_MS = 2000
+const MAX_PROXIMITY_SNAPSHOTS = 2700  // ~90 min at 2s; same halving-thin fallback as MAX_SAMPLES
 
 export class SessionCollector {
   readonly record: SessionRecord
@@ -229,6 +254,7 @@ export class SessionCollector {
   private currentLapDistance: number | null = null
   private sessionStartMs = Date.now()
   private lastSampleMs = 0
+  private lastProximitySampleMs = 0
   private safetyCarActive = false
   private safetyCarThisLap = false
   private stintStartLap = 1
@@ -333,6 +359,32 @@ export class SessionCollector {
    *  at each lap boundary to build a bounded grid_position_history entry. */
   updateLapDataGridSnapshot(entries: LapGridEntry[]): void {
     this.latestLapGrid = entries
+  }
+
+  /** Race Context Intelligence: buffered all-car proximity snapshot, throttled
+   *  the same way updateTelemetry throttles the player's own samples — not a
+   *  per-UDP-frame record, fires at most once per PROXIMITY_SAMPLE_INTERVAL_MS.
+   *  Independent of updateLapDataGridSnapshot above (that one is an unthrottled
+   *  "latest" pointer read only at player lap boundaries; this one is a real,
+   *  bounded, appended history). */
+  updateProximitySnapshot(entries: LapGridEntry[]): void {
+    const now = Date.now()
+    if (now - this.lastProximitySampleMs < PROXIMITY_SAMPLE_INTERVAL_MS) return
+    this.lastProximitySampleMs = now
+    if (!this.record.proximity_snapshots) this.record.proximity_snapshots = []
+    this.record.proximity_snapshots.push({
+      t: now - this.sessionStartMs,
+      cars: entries.map((e) => ({
+        vehicle_index: e.vehicleIndex,
+        car_position: e.carPosition,
+        lap_number: e.lapNumber,
+        total_distance: e.totalDistance,
+        gap_ahead_ms: e.gapAheadMs,
+      })),
+    })
+    if (this.record.proximity_snapshots.length > MAX_PROXIMITY_SNAPSHOTS) {
+      this.record.proximity_snapshots = this.record.proximity_snapshots.filter((_, i) => i % 2 === 0)
+    }
   }
 
   /** Full replace — Final Classification broadcasts a complete snapshot. */

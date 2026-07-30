@@ -142,6 +142,9 @@ export class SessionLifecycle {
           if (completed) {
             this.events.onLapComplete(this.collector.record.track_name, this.collector.currentLap)
           }
+          // Race Context Intelligence (additive): buffered all-car proximity
+          // snapshot, throttled internally — see updateProximitySnapshot.
+          if (pkt.grid) this.collector.updateProximitySnapshot(pkt.grid)
           // Finished / DNF result status ends the session
           if (pkt.resultStatus === 3 || (pkt.resultStatus >= 4 && pkt.resultStatus <= 7)) {
             this.endSession(false)
