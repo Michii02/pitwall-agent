@@ -9,7 +9,7 @@
  * UDP silence while active (abandoned session).
  */
 
-import { SessionCollector, type SessionRecord } from './collector'
+import { SessionCollector, type SessionRecord, type CaptureProfile } from './collector'
 import type { ParseResult } from '../udp/parser'
 import { SESSION_TYPE_NAMES, type SessionPacket, type GameVersion } from '../udp/packets/common'
 import { log } from '../utils/logger'
@@ -34,7 +34,10 @@ export class SessionLifecycle {
   private abandonTimer: NodeJS.Timeout | null = null
   private connectedTimer: NodeJS.Timeout | null = null
 
-  constructor(private events: LifecycleEvents) {}
+  // captureProfile is optional so existing construction keeps working
+  // unchanged; omitted means PC / PC_NATIVE, which is what every session
+  // before League Session Intelligence effectively was.
+  constructor(private events: LifecycleEvents, private captureProfile?: CaptureProfile) {}
 
   get currentState(): AgentState { return this.state }
   get sessionDetail(): string | null {
@@ -205,7 +208,7 @@ export class SessionLifecycle {
     if (s.sessionType === 0 || s.trackId < 0) return
 
     this.setState('SESSION_STARTING', reason)
-    this.collector = new SessionCollector(this.gameVersion, s)
+    this.collector = new SessionCollector(this.gameVersion, s, this.captureProfile)
     this.setState('SESSION_ACTIVE')
   }
 

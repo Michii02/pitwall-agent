@@ -31,6 +31,8 @@ export interface AgentConfig {
   agentToken: string
   udpPort: number
   udpBindAddress: string
+  /** Where the driver races. Declared, never inferred — see DEFAULT_ENV. */
+  capturePlatform: 'PC' | 'PLAYSTATION' | 'XBOX'
   gameVersion: 'auto' | 'f1_2023' | 'f1_2024' | 'f1_2025'
   logLevel: 'debug' | 'info' | 'warn' | 'error'
   logMaxSizeMb: number
@@ -40,6 +42,10 @@ export interface AgentConfig {
    *  to relay every telemetry packet to, so the game can point at PitWall
    *  exclusively while those tools keep working unmodified. */
   forwardTargets: string
+  /** Local-only (127.0.0.1) WebSocket bridge broadcasting parsed steer/
+   *  throttle/brake to same-machine consumers (e.g. the input-trace overlay). */
+  overlayBridgeEnabled: boolean
+  overlayBridgePort: number
 }
 
 // Default server the packaged agent talks to. Bake the deployed URL at package
@@ -56,6 +62,12 @@ PITWALL_AGENT_TOKEN=
 # on the right port for this setup rather than clashing with Moza on 20777.
 UDP_PORT=20779
 UDP_BIND_ADDRESS=0.0.0.0
+# Where you race. PC (default) | PLAYSTATION | XBOX.
+# Set this to PLAYSTATION or XBOX when this machine is receiving telemetry
+# over the local network from a console — the capture path is identical, this
+# only labels the session honestly (F1's UDP feed doesn't identify the
+# sending platform, so PitWall cannot infer it).
+CAPTURE_PLATFORM=PC
 GAME_VERSION=auto
 LOG_LEVEL=info
 LOG_MAX_SIZE_MB=10
@@ -66,6 +78,12 @@ LOG_MAX_FILES=3
 # above ONLY — F1 can only send to one target, so any other tool must receive
 # its copy from PitWall's relay instead of listening directly.
 FORWARD_TARGETS=127.0.0.1:20777
+
+# Local WebSocket bridge (127.0.0.1 only) broadcasting parsed steer/throttle/
+# brake to same-machine consumers (e.g. the input-trace overlay app). Never
+# touches the UDP telemetry socket above — see src/overlay/localBridge.ts.
+OVERLAY_BRIDGE_ENABLED=true
+OVERLAY_BRIDGE_PORT=20780
 `
 
 // A process launched interactively (double-clicked shortcut → cmd.exe → tsx)
@@ -168,12 +186,17 @@ export function loadConfig(): AgentConfig {
     agentToken: process.env.PITWALL_AGENT_TOKEN ?? '',
     udpPort: Number(process.env.UDP_PORT ?? 20779), // matches DEFAULT_ENV's UDP_PORT above — must not drift from it
     udpBindAddress: process.env.UDP_BIND_ADDRESS ?? '0.0.0.0',
+    capturePlatform: (['PC', 'PLAYSTATION', 'XBOX'].includes((process.env.CAPTURE_PLATFORM ?? '').toUpperCase())
+      ? (process.env.CAPTURE_PLATFORM as string).toUpperCase()
+      : 'PC') as AgentConfig['capturePlatform'],
     gameVersion: ['auto', 'f1_2023', 'f1_2024', 'f1_2025'].includes(gameVersion) ? gameVersion : 'auto',
     logLevel: (['debug', 'info', 'warn', 'error'].includes(process.env.LOG_LEVEL ?? '') ? process.env.LOG_LEVEL : 'info') as AgentConfig['logLevel'],
     logMaxSizeMb: Number(process.env.LOG_MAX_SIZE_MB ?? 10),
     logMaxFiles: Number(process.env.LOG_MAX_FILES ?? 3),
     firstRun,
     forwardTargets: process.env.FORWARD_TARGETS ?? '',
+    overlayBridgeEnabled: (process.env.OVERLAY_BRIDGE_ENABLED ?? 'true') !== 'false',
+    overlayBridgePort: Number(process.env.OVERLAY_BRIDGE_PORT ?? 20780),
   }
 }
 

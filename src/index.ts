@@ -11,6 +11,8 @@ import { acquireInstanceLock, releaseInstanceLock } from './instance-lock'
 import { telemetryHealth } from './health/state'
 import { startUdpListener } from './udp/listener'
 import { parseRelayTargets, TelemetryRelay } from './udp/relay'
+import { OverlayBridge } from './overlay/localBridge'
+import { startOverlayPreferencePoll } from './overlay/preferencePoll'
 import { parsePacket, parseHeader } from './udp/parser'
 import { SessionLifecycle } from './session/lifecycle'
 import { SessionQueue } from './sync/queue'
@@ -95,6 +97,11 @@ async function main(): Promise<void> {
       tray.setState('SESSION_ACTIVE') // refreshes "Lap N" in menu
       live.pushSnapshot()
     },
+  }, {
+    // Capture provenance (League Session Intelligence MVP 1.1). The capture
+    // path is identical for PC and console — this only labels the session.
+    platform: config.capturePlatform,
+    captureMethod: config.capturePlatform === 'PC' ? 'PC_NATIVE' : 'CONSOLE_DESKTOP',
   })
 
   const versionOverride: GameVersion | undefined =
@@ -111,6 +118,16 @@ async function main(): Promise<void> {
   const relayTargets = parseRelayTargets(config.forwardTargets)
   const relay = new TelemetryRelay(relayTargets)
 
+  // Local-only bridge for same-machine consumers (e.g. the input-trace
+  // overlay) to subscribe to already-parsed telemetry. Best-effort — see
+  // overlay/localBridge.ts.
+  const overlayBridge = new OverlayBridge(config.overlayBridgePort, config.overlayBridgeEnabled)
+  // Settings-page enable/disable, layered on top of the local master switch
+  // above — only polls at all when that switch permits the bridge to run.
+  const stopOverlayPoll = config.overlayBridgeEnabled
+    ? startOverlayPreferencePoll(config.apiUrl, config.agentToken, overlayBridge)
+    : () => {}
+
   const socket = startUdpListener(config.udpPort, config.udpBindAddress, {
     onPacket: (buf) => {
       // Header-only parse (cheap, works even for unsupported formats like a
@@ -126,6 +143,7 @@ async function main(): Promise<void> {
         if (result) {
           lifecycle.feed(result)
           live.forward(result)
+          overlayBridge.forward(result)
         }
       } catch (err) {
         log.error(`Packet handling error: ${(err as Error).message}`)
@@ -163,6 +181,8 @@ async function main(): Promise<void> {
     log.info('PitWall Agent shutting down')
     try { live.stop() } catch { /* ok */ }
     try { relay.close() } catch { /* ok */ }
+    try { stopOverlayPoll() } catch { /* ok */ }
+    try { overlayBridge.close() } catch { /* ok */ }
     try { socket.close() } catch { /* ok */ }
     try { queue.close() } catch { /* ok */ }
     telemetryHealth.stop()

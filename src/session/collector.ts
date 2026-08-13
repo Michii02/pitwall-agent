@@ -150,6 +150,16 @@ export interface GridPositionSnapshot {
 // and must stay unmodified since raceStory.ts already depends on its shape).
 // `t` uses the same "ms since session start" epoch as TelemetrySample.t, so
 // the two streams are natively joinable server-side.
+/**
+ * Where the driver races and how PitWall receives it. User-declared
+ * configuration, not telemetry — F1's UDP feed does not identify the sending
+ * platform, so this is reported honestly as a setting rather than inferred.
+ */
+export interface CaptureProfile {
+  platform: 'PC' | 'PLAYSTATION' | 'XBOX' | 'UNKNOWN'
+  captureMethod: 'PC_NATIVE' | 'CONSOLE_DESKTOP'
+}
+
 export interface ProximitySnapshot {
   t: number
   cars: {
@@ -172,6 +182,18 @@ export interface SessionRecord {
   /** m_aiDifficulty (0-110), F1 25 only — see SessionPacket.aiDifficulty for
    *  why F1 23/24 always resolve to null. Never a guessed value. */
   ai_difficulty: number | null
+  /** League Session Intelligence (MVP 1.1): capture provenance.
+   *
+   *  `platform` is where the driver RACED; `capture_method` is how PitWall
+   *  received it — deliberately separate axes, because a console session is
+   *  captured by a PC running this agent (PLAYSTATION + CONSOLE_DESKTOP).
+   *
+   *  Both are user-declared configuration, not telemetry: F1's UDP feed does
+   *  not identify the sending platform for the player's own car, so this is
+   *  reported honestly as a setting rather than inferred. Defaults keep every
+   *  existing PC install behaving exactly as before. */
+  platform: 'PC' | 'PLAYSTATION' | 'XBOX' | 'UNKNOWN'
+  capture_method: 'PC_NATIVE' | 'CONSOLE_DESKTOP'
   track_id: number
   track_name: string
   session_type: string
@@ -264,13 +286,18 @@ export class SessionCollector {
   // used to build a per-lap-boundary position-history entry (see updateLap).
   private latestLapGrid: LapGridEntry[] | null = null
 
-  constructor(gameVersion: GameVersion, session: SessionPacket) {
+  constructor(gameVersion: GameVersion, session: SessionPacket, captureProfile?: CaptureProfile) {
     this.record = {
       id: randomUUID(),
       source: 'udp_agent',
       game_version: gameVersion,
       vehicle_era: deriveVehicleEra(session.formula),
       ai_difficulty: session.aiDifficulty,
+      // Defaults preserve existing PC installs exactly: an agent that never
+      // sets a profile keeps reporting PC / PC_NATIVE, which is what every
+      // session before this change effectively was.
+      platform: captureProfile?.platform ?? 'PC',
+      capture_method: captureProfile?.captureMethod ?? 'PC_NATIVE',
       track_id: session.trackId,
       track_name: TRACK_NAMES[session.trackId] ?? `Track ${session.trackId}`,
       session_type: SESSION_TYPE_NAMES[session.sessionType] ?? 'unknown',
