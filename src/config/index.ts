@@ -48,10 +48,18 @@ export interface AgentConfig {
   overlayBridgePort: number
 }
 
-// Default server the packaged agent talks to. Bake the deployed URL at package
-// time by setting PITWALL_DEFAULT_API_URL (see DEPLOYMENT.md); falls back to
-// localhost for local dev. Each tester can still override via PITWALL_API_URL.
-const PRODUCTION_API_URL = process.env.PITWALL_DEFAULT_API_URL || 'http://localhost:3001'
+// Default server the packaged agent talks to.
+//
+// This is a plain source-level fallback, not something "baked in" at package
+// time — scripts/package.js only runs `tsc` then `pkg`, neither of which do
+// build-time env substitution. process.env.PITWALL_DEFAULT_API_URL below is
+// evaluated when the PACKAGED EXE STARTS, on whatever machine runs it — for
+// a real end user that's never set, so this literal is what a fresh install
+// actually points at. (Confirmed by reading scripts/package.js directly: no
+// env-var handling exists there at all.) Local development still overrides
+// this via a repo-root .env (see loadConfig()'s devEnv check below) or by
+// setting PITWALL_DEFAULT_API_URL/PITWALL_API_URL directly.
+const PRODUCTION_API_URL = process.env.PITWALL_DEFAULT_API_URL || 'https://api.pitwall.gg'
 
 const DEFAULT_ENV = `# PitWall Agent configuration
 PITWALL_API_URL=${PRODUCTION_API_URL}

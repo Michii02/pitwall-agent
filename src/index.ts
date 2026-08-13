@@ -21,7 +21,7 @@ import { LiveForwarder } from './sync/live'
 import { TrayManager, openLogsInNotepad, openSettingsFile } from './tray/icon'
 import type { GameVersion } from './udp/packets/common'
 
-const AGENT_VERSION = '1.0.0'
+const AGENT_VERSION = '1.0.1'
 const ERROR_STATE_AFTER_MS = 30 * 60_000
 const QUEUE_WARNING_THRESHOLD = 50
 
