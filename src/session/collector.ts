@@ -227,6 +227,11 @@ export interface SessionRecord {
   // Race Grid Intelligence (Phase 1) — all optional/additive, never read by
   // any existing consumer of this record.
   player_vehicle_index?: number
+  // Session Intelligence Repair — the game's own session identifier
+  // (m_sessionUID), already parsed into every packet header but never
+  // persisted anywhere until now. Purely diagnostic/audit evidence for the
+  // server's driver-identity resolver; set once per session, never clobbered.
+  session_uid?: string
   participants_grid?: ParticipantGridRecord[]
   participants_classification?: ClassificationGridRecord[]
   opponent_history?: Record<number, OpponentHistoryRecord>
@@ -362,9 +367,33 @@ export class SessionCollector {
   // ── Race Grid Intelligence (Phase 1) feeds ──────────────────────────────
   // All additive — none of the methods above are modified or called from here.
 
-  /** Refreshed from every packet's header — self-correcting, no staleness risk. */
+  /**
+   * Refreshed from every packet's header — self-correcting, no staleness
+   * risk under normal play. But it's also unvalidated and unconditional: F1's
+   * m_playerCarIndex can reflect a replay/spectate camera's car during a
+   * post-finish-line window rather than the driver's own car, and this method
+   * has no way to tell that apart from a genuine value. Session Intelligence
+   * Repair Phase 1: log every actual CHANGE (not every packet — that would be
+   * silent no-op noise) so real production data can confirm or rule out that
+   * failure mode before the server-side resolver's tier weighting is
+   * finalised. Dev-only by way of the logger's own `debug` level gate.
+   */
   updatePlayerVehicleIndex(idx: number): void {
+    if (idx !== this.record.player_vehicle_index) {
+      log.debug(
+        `player_vehicle_index changed ${this.record.player_vehicle_index ?? '(unset)'} → ${idx} ` +
+        `· lap=${this.record.laps.length} ` +
+        `· elapsed=${Math.round((Date.now() - this.sessionStartMs) / 1000)}s`,
+      )
+    }
     this.record.player_vehicle_index = idx
+  }
+
+  /** Set once from the first packet that carries it — never clobbered by a
+   *  later read, matching the vehicle_era/ai_difficulty "don't clobber a good
+   *  read" convention already used elsewhere in this class. */
+  updateSessionUid(uid: string): void {
+    if (!this.record.session_uid && uid) this.record.session_uid = uid
   }
 
   /** Full replace, last-write-wins per vehicle slot (matches updateParticipant's

@@ -82,6 +82,10 @@ export class SessionLifecycle {
     // which vehicle slot is the player's up to date — self-correcting, every
     // packet carries it in the header.
     this.collector?.updatePlayerVehicleIndex(result.header.playerCarIndex)
+    // Session Intelligence Repair: capture the game's own session UID once
+    // per session — new diagnostic/audit evidence, never read by anything
+    // that exists today.
+    this.collector?.updateSessionUid(result.header.sessionUid)
 
     const pkt = result.packet
     switch (pkt.kind) {
