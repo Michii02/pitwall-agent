@@ -15,7 +15,18 @@ import WebSocket from 'ws'
 import type { ParseResult } from '../udp/parser'
 import type { AgentConfig } from '../config'
 import type { HealthSnapshot } from '../health/state'
+import type { AgentNetworkInfo } from '../network/interfaces'
 import { log } from '../utils/logger'
+
+// MVP1 Phase 1f — network interfaces and the currently-configured capture
+// platform are a different axis from health/state.ts's UDP-signal-driven
+// state (that module is deliberately left untouched, see network/interfaces.ts's
+// own comment) — composed onto the health payload here at the push boundary
+// instead.
+export type AgentHealthPushPayload = HealthSnapshot & {
+  network: AgentNetworkInfo
+  capturePlatform: AgentConfig['capturePlatform']
+}
 
 // How often to ping the server once connected, and how long without a pong
 // before the connection is declared dead. 'close'/'error' alone are not
@@ -40,10 +51,11 @@ export class LiveForwarder {
     config: AgentConfig,
     /** Returns the current session snapshot — sent on connect and on demand. */
     private getSnapshot?: () => object,
-    /** Returns the current UDP health snapshot — sent on (re)connect so a
-     *  fresh WS doesn't have to wait for the next state transition to learn
-     *  where things already stand (e.g. telemetry was already flowing). */
-    private getHealthSnapshot?: () => HealthSnapshot,
+    /** Returns the current UDP health snapshot (plus network/platform info,
+     *  MVP1 Phase 1f) — sent on (re)connect so a fresh WS doesn't have to
+     *  wait for the next state transition to learn where things already
+     *  stand (e.g. telemetry was already flowing). */
+    private getHealthSnapshot?: () => AgentHealthPushPayload,
   ) {
     const wsBase = config.apiUrl.replace(/^http/, 'ws')
     this.url = `${wsBase}/agent${config.agentToken ? `?token=${encodeURIComponent(config.agentToken)}` : ''}`
@@ -160,7 +172,7 @@ export class LiveForwarder {
    *  bind/packet events, session to lap/session packets). The server caches
    *  this per-pairing-token and does NOT broadcast it to browsers (unlike
    *  agentSession) — see server/ws/index.ts for why. */
-  pushHealth(snapshot: HealthSnapshot): void {
+  pushHealth(snapshot: AgentHealthPushPayload): void {
     if (!this.connected || !this.ws) return
     try {
       this.ws.send(JSON.stringify({ type: 'agentHealth', timestamp: Date.now(), data: snapshot }))

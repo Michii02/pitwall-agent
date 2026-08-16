@@ -9,6 +9,7 @@ import { loadConfig, APP_DIR } from './config'
 import { configureLogger, log } from './utils/logger'
 import { acquireInstanceLock, releaseInstanceLock } from './instance-lock'
 import { telemetryHealth } from './health/state'
+import { detectAgentNetworkInfo } from './network/interfaces'
 import { startUdpListener } from './udp/listener'
 import { parseRelayTargets, TelemetryRelay } from './udp/relay'
 import { OverlayBridge } from './overlay/localBridge'
@@ -108,9 +109,17 @@ async function main(): Promise<void> {
     config.gameVersion === 'auto' ? undefined : config.gameVersion
 
   // Live-view relay to the PitWall server WS (display only; persistence is udp-ingest)
-  const live = new LiveForwarder(config, () => lifecycle.snapshot, () => telemetryHealth.snapshot())
+  // MVP1 Phase 1f: network interfaces + the configured capture platform are
+  // composed onto every health push here, at the boundary — health/state.ts
+  // itself stays driven only by real UDP signals (see network/interfaces.ts).
+  const buildHealthPushPayload = () => ({
+    ...telemetryHealth.snapshot(),
+    network: detectAgentNetworkInfo(),
+    capturePlatform: config.capturePlatform,
+  })
+  const live = new LiveForwarder(config, () => lifecycle.snapshot, buildHealthPushPayload)
   live.start()
-  telemetryHealth.onStateChange((snapshot) => live.pushHealth(snapshot))
+  telemetryHealth.onStateChange(() => live.pushHealth(buildHealthPushPayload()))
 
   // Telemetry relay to other UDP tools (Moza Pit House, SimHub, …). F1 only
   // sends to one target, so this agent must be that exclusive target and
