@@ -18,6 +18,14 @@ export type AgentState = 'IDLE' | 'CONNECTED' | 'SESSION_STARTING' | 'SESSION_AC
 
 const ABANDON_TIMEOUT_MS = 60_000
 const CONNECTED_TIMEOUT_MS = 10_000
+// A finished session's Session/Lap/Final-Classification packets keep being
+// broadcast by the game while the player sits on the post-race results/
+// podium screen (confirmed in production logs: rapid Session
+// started→ended(0 laps)→discarded cycles, using the just-finished race's own
+// stale classification). Bounded, not permanent — if this UID-based guard is
+// ever wrong (e.g. a real same-UID session transition it doesn't know about),
+// capture self-heals after this cooldown instead of staying blocked forever.
+const SAME_SESSION_SUPPRESS_MS = 120_000
 
 export interface LifecycleEvents {
   onStateChange: (state: AgentState, detail?: string) => void
@@ -33,6 +41,11 @@ export class SessionLifecycle {
   private lastPacketAt = 0
   private abandonTimer: NodeJS.Timeout | null = null
   private connectedTimer: NodeJS.Timeout | null = null
+  // Same-session-broadcast suppression (see SAME_SESSION_SUPPRESS_MS above).
+  private currentHeaderSessionUid: string | null = null
+  private lastFinalizedSessionUid: string | null = null
+  private lastFinalizedAt = 0
+  private suppressedRestartLogged = false
 
   // captureProfile is optional so existing construction keeps working
   // unchanged; omitted means PC / PC_NATIVE, which is what every session
@@ -73,6 +86,7 @@ export class SessionLifecycle {
   feed(result: ParseResult): void {
     this.lastPacketAt = Date.now()
     this.gameVersion = result.gameVersion
+    this.currentHeaderSessionUid = result.header.sessionUid
     this.armTimers()
 
     // Any packet flow while idle means the game is running
@@ -106,7 +120,11 @@ export class SessionLifecycle {
             log.info(`Session change detected (${this.collector.record.session_type} → ${mappedType}) — committing previous session and starting new one`)
             this.endSession(false)
             this.lastSessionPacket = pkt
-            this.startSession('session type changed')
+            // Bypasses the same-session guard: a live type/track change while
+            // actively collecting is strong independent evidence of a real
+            // transition (e.g. Qualifying → Race), regardless of whether the
+            // game happens to keep the same session UID across it.
+            this.startSession('session type changed', { bypassSameSessionGuard: true })
           } else {
             this.collector.updateSession(pkt)
           }
@@ -119,7 +137,10 @@ export class SessionLifecycle {
 
       case 'event': {
         const player = result.header.playerCarIndex
-        if (pkt.code === 'SSTA') this.startSession('SSTA event')
+        // Bypasses the same-session guard: SSTA is the game's own explicit
+        // "a session just started" signal — as strong a real-start signal as
+        // exists, independent of whatever the session UID happens to do.
+        if (pkt.code === 'SSTA') this.startSession('SSTA event', { bypassSameSessionGuard: true })
         else if (pkt.code === 'SEND') this.endSession(false)
         else if (pkt.code === 'FLAP') log.info('Event · fastest lap')
         else if (pkt.code === 'RCWN') log.info('Event · race winner')
@@ -200,8 +221,20 @@ export class SessionLifecycle {
     }
   }
 
-  private startSession(reason: string): void {
+  private startSession(reason: string, opts: { bypassSameSessionGuard?: boolean } = {}): void {
     if (this.collector) return
+    if (!opts.bypassSameSessionGuard && this.isLikelySameFinishedSession()) {
+      // The game keeps broadcasting the just-finished session's Session/Lap
+      // packets while the player sits on the post-race results/podium
+      // screen — this is leftover broadcast, not a new session starting.
+      // Logged once per suppressed session (not per packet) to avoid
+      // reproducing the exact log spam this guard exists to prevent.
+      if (!this.suppressedRestartLogged) {
+        this.suppressedRestartLogged = true
+        log.debug(`Suppressed session restart (${reason}) — same session UID as the session just finalised`)
+      }
+      return
+    }
     if (!this.lastSessionPacket || !this.gameVersion) {
       // Wait until we know track/type — SESSION packets arrive at 2 Hz
       this.setState('SESSION_STARTING', `awaiting session data (${reason})`)
@@ -216,10 +249,30 @@ export class SessionLifecycle {
     this.setState('SESSION_ACTIVE')
   }
 
+  /**
+   * True when the current packet stream's session UID matches the session we
+   * just finalised, within a bounded cooldown (SAME_SESSION_SUPPRESS_MS) —
+   * the signal that what's arriving is leftover broadcast from a session
+   * that's already over (e.g. sitting on the post-race podium/results
+   * screen), not a genuinely new one. Bounded rather than permanent so a
+   * wrong assumption about the game's session-UID behaviour self-heals
+   * instead of silently blocking capture forever.
+   */
+  private isLikelySameFinishedSession(): boolean {
+    return (
+      this.lastFinalizedSessionUid != null &&
+      this.currentHeaderSessionUid === this.lastFinalizedSessionUid &&
+      Date.now() - this.lastFinalizedAt < SAME_SESSION_SUPPRESS_MS
+    )
+  }
+
   private endSession(abandoned: boolean): void {
     if (!this.collector) return
     this.setState('SESSION_ENDING')
     const record = this.collector.finalise(abandoned)
+    this.lastFinalizedSessionUid = record.session_uid ?? this.currentHeaderSessionUid
+    this.lastFinalizedAt = Date.now()
+    this.suppressedRestartLogged = false
     this.collector = null
     this.lastSessionPacket = null
 
