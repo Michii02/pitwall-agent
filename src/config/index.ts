@@ -8,7 +8,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { execFileSync } from 'node:child_process'
 import dotenv from 'dotenv'
 
 // Resolve the config/data dir deterministically. Some launch contexts (a
@@ -121,18 +120,40 @@ function syncSleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
-/** Read a file via a fresh child process rather than this process's own fs
- *  calls — see readEnvTokenAware's comment for why that matters here. */
-function readFileViaFreshProcess(filePath: string): string | null {
-  if (process.platform !== 'win32') return null
+/**
+ * Read a file via a brand-new file descriptor (fresh open/read/close
+ * syscalls), rather than going through a second call on whatever handle
+ * fs.readFileSync used internally — see readEnvTokenAware's comment for why
+ * that matters here.
+ *
+ * This used to shell out to `powershell.exe` via execFileSync for the same
+ * "fresh read" effect, with a 5s timeout. That's exactly what caused a real,
+ * repeated production incident: on at least three separate occasions the
+ * agent process was found alive (per Windows) but had produced ZERO log
+ * output for 3+ hours and never bound the UDP socket — impossible unless
+ * something before the very first log.info() call (line ~33, before this
+ * function can even run) was blocked indefinitely. Node's `timeout` option
+ * on execFileSync is not reliably honoured on Windows when the spawned
+ * process (or a child it spawns, e.g. PowerShell's own startup machinery)
+ * doesn't terminate cleanly on the kill signal — so a transient .env-read
+ * glitch this fallback exists to work around could turn into an indefinite,
+ * silent, total capture outage. A plain fs.openSync/readSync/closeSync
+ * round-trip gets the same "fresh syscalls, not a second call on a
+ * possibly-cached handle" property with no child process and therefore no
+ * hang risk at all.
+ */
+function readFileViaFreshDescriptor(filePath: string): string | null {
+  let fd: number | undefined
   try {
-    return execFileSync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', 'Get-Content -LiteralPath $args[0] -Raw', '--', filePath],
-      { encoding: 'utf8', timeout: 5000 },
-    )
+    fd = fs.openSync(filePath, 'r')
+    const stat = fs.fstatSync(fd)
+    const buf = Buffer.alloc(stat.size)
+    fs.readSync(fd, buf, 0, stat.size, 0)
+    return buf.toString('utf8')
   } catch {
     return null
+  } finally {
+    if (fd != null) { try { fs.closeSync(fd) } catch { /* already closed */ } }
   }
 }
 
@@ -153,16 +174,16 @@ function readEnvTokenAware(envPath: string): Record<string, string> {
       return parsed
     }
   }
-  console.warn('[config] same-process retries exhausted — re-reading via an external process')
-  const external = readFileViaFreshProcess(envPath)
-  if (external) {
-    const externalParsed = dotenv.parse(external)
-    if (externalParsed.PITWALL_AGENT_TOKEN) {
-      console.warn('[config] external re-read recovered the token — this process had a stale view of .env')
-      return externalParsed
+  console.warn('[config] same-process retries exhausted — re-reading via a fresh file descriptor')
+  const fresh = readFileViaFreshDescriptor(envPath)
+  if (fresh) {
+    const freshParsed = dotenv.parse(fresh)
+    if (freshParsed.PITWALL_AGENT_TOKEN) {
+      console.warn('[config] fresh-descriptor re-read recovered the token — this process had a stale view of .env')
+      return freshParsed
     }
   }
-  console.warn('[config] .env token still empty after same-process retries and an external re-read — proceeding without one')
+  console.warn('[config] .env token still empty after same-process retries and a fresh-descriptor re-read — proceeding without one')
   return parsed
 }
 
