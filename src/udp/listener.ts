@@ -9,7 +9,6 @@
  */
 
 import dgram from 'node:dgram'
-import { execFile } from 'node:child_process'
 import { log } from '../utils/logger'
 
 export interface UdpListenerEvents {
@@ -17,8 +16,11 @@ export interface UdpListenerEvents {
   onBindError: (err: Error) => void
   onListening: (address: string, port: number) => void
   /** Another process holds a more-specific binding on our port and is
-   *  consuming the game's packets (e.g. MOZA Pit House on 127.0.0.1). */
-  onPortHijacked?: (byProcess: string) => void
+   *  consuming the game's packets (e.g. MOZA Pit House on 127.0.0.1). The
+   *  offending process's name is no longer identified (see
+   *  detectPortConflict's comment for why the PowerShell-based lookup that
+   *  used to provide it was removed). */
+  onPortHijacked?: () => void
 }
 
 export interface UdpListenerHandle {
@@ -36,15 +38,53 @@ const RETRY_DELAYS_MS = [2000, 5000, 15_000, 30_000]
  * hold 0.0.0.0:<port>, it receives everything and we receive nothing —
  * silently. Detect that so the user gets a clear warning instead of
  * mysteriously missing sessions.
+ *
+ * Previously shelled out to `powershell.exe` (Get-NetUDPEndpoint) via
+ * execFile with a 15s timeout, on a 30s recurring interval whenever no
+ * packets have arrived yet. That was a real, repeated production incident:
+ * Node's child_process timeout isn't reliably honoured on Windows when the
+ * spawned process doesn't terminate cleanly, and — unlike a one-shot config
+ * read — this ran every 30s for as long as telemetry was idle, silently
+ * accumulating hung/zombie powershell.exe processes over hours until the
+ * whole agent process eventually stalled (matches the observed pattern: a
+ * working retry loop that logs normally for a while, then goes completely
+ * silent — timers included — with no crash and no further output).
+ *
+ * Replaced with a pure-Node probe: attempt to bind a throwaway socket to
+ * 127.0.0.1:<port> (no reuseAddr). EADDRINUSE means something else already
+ * holds a specific binding there — the exact hijack condition described
+ * above — with zero child-process/hang risk. Trade-off, accepted: this can
+ * no longer name the offending process (the warning is generic instead of
+ * naming e.g. "MOZA Pit House"), and a hijacking app that itself sets
+ * SO_REUSEADDR on the same address:port could let both binds succeed,
+ * silently missing that specific case — a real, disclosed limitation.
  */
-export function detectPortConflict(port: number, cb: (processName: string | null) => void): void {
-  if (process.platform !== 'win32') { cb(null); return }
-  execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command',
-    `Get-NetUDPEndpoint -LocalPort ${port} -ErrorAction SilentlyContinue | Where-Object { $_.LocalAddress -ne '0.0.0.0' -and $_.OwningProcess -ne ${process.pid} } | ForEach-Object { (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName } | Select-Object -First 1`,
-  ], { timeout: 15_000 }, (err, stdout) => {
-    const name = (stdout ?? '').trim()
-    cb(!err && name ? name : null)
-  })
+export function detectPortConflict(port: number, cb: (hijacked: boolean) => void): void {
+  let settled = false
+  const finish = (hijacked: boolean) => {
+    if (settled) return
+    settled = true
+    cb(hijacked)
+  }
+  try {
+    const probe = dgram.createSocket({ type: 'udp4' })
+    const safetyTimer = setTimeout(() => {
+      try { probe.close() } catch { /* already closing */ }
+      finish(false)
+    }, 3000)
+    probe.once('error', (err: NodeJS.ErrnoException) => {
+      clearTimeout(safetyTimer)
+      finish(err.code === 'EADDRINUSE')
+    })
+    probe.once('listening', () => {
+      clearTimeout(safetyTimer)
+      try { probe.close() } catch { /* already closing */ }
+      finish(false)
+    })
+    probe.bind(port, '127.0.0.1')
+  } catch {
+    finish(false)
+  }
 }
 
 export function startUdpListener(
@@ -74,15 +114,15 @@ export function startUdpListener(
     // binding exists on our port, another app is eating the telemetry.
     const hijackTimer = setInterval(() => {
       if (packetsReceived > 0 || hijackWarned) return
-      detectPortConflict(port, (processName) => {
-        if (processName && packetsReceived === 0 && !hijackWarned) {
+      detectPortConflict(port, (hijacked) => {
+        if (hijacked && packetsReceived === 0 && !hijackWarned) {
           hijackWarned = true
-          log.warn(`"${processName}" is bound to 127.0.0.1:${port} and is consuming F1 telemetry — this agent receives nothing (` +
+          log.warn(`Another application is bound to 127.0.0.1:${port} and is consuming F1 telemetry — this agent receives nothing (` +
             `Windows delivers unicast UDP to only the most specific binding, so two apps can't both listen on the same port). ` +
-            `Fix: reconfigure ${processName} to listen on a different port (e.g. 20778) instead of ${port}, keep F1 25's UDP ` +
+            `Fix: reconfigure that application to listen on a different port (e.g. 20778) instead of ${port}, keep F1 25's UDP ` +
             `output pointed at PitWall's port (${port}), and add "127.0.0.1:20778" to FORWARD_TARGETS in the PitWall Agent ` +
-            `settings — PitWall will relay every packet to ${processName} so it keeps working unmodified.`)
-          events.onPortHijacked?.(processName)
+            `settings — PitWall will relay every packet to it so it keeps working unmodified.`)
+          events.onPortHijacked?.()
         }
       })
     }, 30_000)

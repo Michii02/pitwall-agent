@@ -165,11 +165,11 @@ async function main(): Promise<void> {
         `UDP port ${config.udpPort} is in use by another application. Change the port in Settings, or point that ` +
         'application at a different port and add it to FORWARD_TARGETS so PitWall relays telemetry to it.')
     },
-    onPortHijacked: (byProcess) => {
+    onPortHijacked: () => {
       telemetryHealth.onPortHijacked()
       tray.setState('ERROR')
       tray.notify('Telemetry blocked by another app',
-        `${byProcess} is consuming F1 telemetry on port ${config.udpPort}. Reconfigure ${byProcess} to use a different ` +
+        `Another application is consuming F1 telemetry on port ${config.udpPort}. Reconfigure it to use a different ` +
         'port and add it to FORWARD_TARGETS in agent settings — PitWall will relay telemetry to it.')
     },
     onListening: (address, port) => {
