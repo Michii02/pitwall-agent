@@ -48,6 +48,11 @@ export class SyncSender {
     await this.syncAll()
   }
 
+  stop(): void {
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = null
+  }
+
   private async syncAll(): Promise<void> {
     if (this.syncing) return
     this.syncing = true

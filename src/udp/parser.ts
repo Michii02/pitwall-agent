@@ -26,6 +26,18 @@ const LAYOUTS: Record<number, VersionLayout> = {
 
 const warnedFormats = new Set<number>()
 
+export function isSupportedPacketFormat(packetFormat: number, versionOverride?: GameVersion): boolean {
+  return versionOverride != null || LAYOUTS[packetFormat] != null
+}
+
+export function isIntentionallyIgnoredPacket(packetId: number, packetFormat: number, versionOverride?: GameVersion): boolean {
+  if (packetId === PACKET.MOTION || packetId === PACKET.LOBBY_INFO) return true
+  const layout = versionOverride
+    ? Object.values(LAYOUTS).find((candidate) => candidate.gameVersion === versionOverride)
+    : LAYOUTS[packetFormat]
+  return packetId === PACKET.TYRE_SETS && layout?.hasTyreSets === false
+}
+
 export function parseHeader(buf: Buffer): ParsedHeader | null {
   if (buf.length < HEADER_SIZE) return null
   const lo = buf.readUInt32LE(OFF_SESSION_UID_LO)

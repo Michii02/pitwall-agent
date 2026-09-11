@@ -63,9 +63,9 @@ function resolveNativeBinding(): string | undefined {
 export class SessionQueue {
   private db: Database.Database
 
-  constructor() {
+  constructor(dbPath: string = DB_PATH) {
     const nativeBinding = resolveNativeBinding()
-    this.db = new Database(DB_PATH, nativeBinding ? { nativeBinding } : undefined)
+    this.db = new Database(dbPath, nativeBinding ? { nativeBinding } : undefined)
     this.db.pragma('journal_mode = WAL')
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions_buffer (

@@ -12,7 +12,7 @@ import dgram from 'node:dgram'
 import { log } from '../utils/logger'
 
 export interface UdpListenerEvents {
-  onPacket: (buf: Buffer) => void
+  onPacket: (buf: Buffer, source: { address: string; port: number }) => void
   onBindError: (err: Error) => void
   onListening: (address: string, port: number) => void
   /** Another process holds a more-specific binding on our port and is
@@ -105,9 +105,9 @@ export function startUdpListener(
     let packetsReceived = 0
     let hijackWarned = false
 
-    socket.on('message', (msg) => {
+    socket.on('message', (msg, rinfo) => {
       packetsReceived++
-      events.onPacket(msg as Buffer)
+      events.onPacket(msg as Buffer, { address: rinfo.address, port: rinfo.port })
     })
 
     // Periodic hijack check: if we've received nothing while a more-specific

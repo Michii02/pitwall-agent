@@ -15,22 +15,26 @@ let minLevel: Level = 'info'
 let maxSizeBytes = 10 * 1024 * 1024
 let maxFiles = 3
 
-const LOG_FILE = path.join(LOG_DIR, 'agent.log')
+let logFile = path.join(LOG_DIR, 'agent.log')
 
-export function configureLogger(opts: { level: Level; maxSizeMb: number; maxFiles: number }): void {
+export function configureLogger(opts: { level: Level; maxSizeMb: number; maxFiles: number; filePath?: string }): void {
   minLevel = opts.level
   maxSizeBytes = opts.maxSizeMb * 1024 * 1024
   maxFiles = opts.maxFiles
+  if (opts.filePath) logFile = opts.filePath
 }
 
 function rotateIfNeeded(): void {
   try {
-    const stat = fs.statSync(LOG_FILE)
+    const stat = fs.statSync(logFile)
     if (stat.size < maxSizeBytes) return
     // Shift agent.log → agent.1.log → agent.2.log …, dropping the oldest
     for (let i = maxFiles - 1; i >= 1; i--) {
-      const from = i === 1 ? LOG_FILE : path.join(LOG_DIR, `agent.${i - 1}.log`)
-      const to = path.join(LOG_DIR, `agent.${i}.log`)
+      const directory = path.dirname(logFile)
+      const base = path.basename(logFile, path.extname(logFile))
+      const extension = path.extname(logFile)
+      const from = i === 1 ? logFile : path.join(directory, `${base}.${i - 1}${extension}`)
+      const to = path.join(directory, `${base}.${i}${extension}`)
       if (fs.existsSync(from)) fs.renameSync(from, to)
     }
   } catch {
@@ -44,12 +48,12 @@ function write(level: Level, msg: string): void {
   let fileWriteFailed = false
   try {
     rotateIfNeeded()
-    fs.appendFileSync(LOG_FILE, line)
+    fs.appendFileSync(logFile, line)
   } catch (err) {
     fileWriteFailed = true
     // A disk issue is exactly the moment output matters most — never let a
     // production build go completely silent because the file write failed.
-    process.stderr.write(`[logger] failed to write ${LOG_FILE}: ${(err as Error).message}\n`)
+    process.stderr.write(`[logger] failed to write ${logFile}: ${(err as Error).message}\n`)
   }
   // Mirror to console in dev, or as a fallback if the file write just failed.
   if (process.env.NODE_ENV !== 'production' || fileWriteFailed) process.stdout.write(line)
@@ -60,7 +64,7 @@ export const log = {
   info: (msg: string) => write('info', msg),
   warn: (msg: string) => write('warn', msg),
   error: (msg: string) => write('error', msg),
-  filePath: LOG_FILE,
+  get filePath() { return logFile },
 }
 
 /** Format ms → M:SS.mmm for human-readable log lines. */

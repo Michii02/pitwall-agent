@@ -89,9 +89,11 @@ packet on to the other tool's own port.
    tools do; check its own settings.
 3. Add that port to `FORWARD_TARGETS` in `%APPDATA%\PitWall Agent\.env`:
    ```
-   FORWARD_TARGETS=127.0.0.1:20778
+   FORWARD_TARGETS=Moza=127.0.0.1:20778,SimHub=127.0.0.1:20779
    ```
-   Comma-separate multiple targets for more tools.
+   Names are optional, so the existing `127.0.0.1:20778` format still works.
+   Prefix a target with `!` to keep it configured but disabled, for example
+   `!SimHub=127.0.0.1:20779`.
 4. Restart the agent. Tray log will show:
    `Telemetry relay active — forwarding to: 127.0.0.1:20778`
 

@@ -14,7 +14,7 @@ import { startUdpListener } from './udp/listener'
 import { parseRelayTargets, TelemetryRelay } from './udp/relay'
 import { OverlayBridge } from './overlay/localBridge'
 import { startOverlayPreferencePoll } from './overlay/preferencePoll'
-import { parsePacket, parseHeader } from './udp/parser'
+import { processTelemetryDatagram } from './udp/processPacket'
 import { SessionLifecycle } from './session/lifecycle'
 import { SessionQueue } from './sync/queue'
 import { SyncSender } from './sync/sender'
@@ -108,6 +108,12 @@ async function main(): Promise<void> {
   const versionOverride: GameVersion | undefined =
     config.gameVersion === 'auto' ? undefined : config.gameVersion
 
+  // Telemetry relay to other UDP tools (Moza Pit House, SimHub, …). Keep it
+  // before the health payload factory so every push includes current target
+  // counters and errors.
+  const relayTargets = parseRelayTargets(config.forwardTargets)
+  const relay = new TelemetryRelay(relayTargets)
+
   // Live-view relay to the PitWall server WS (display only; persistence is udp-ingest)
   // MVP1 Phase 1f: network interfaces + the configured capture platform are
   // composed onto every health push here, at the boundary — health/state.ts
@@ -116,16 +122,13 @@ async function main(): Promise<void> {
     ...telemetryHealth.snapshot(),
     network: detectAgentNetworkInfo(),
     capturePlatform: config.capturePlatform,
+    recording: lifecycle.snapshot,
+    forwarding: relay.snapshot(),
+    queueDepth: queue.pendingCount(),
   })
   const live = new LiveForwarder(config, () => lifecycle.snapshot, buildHealthPushPayload)
   live.start()
   telemetryHealth.onStateChange(() => live.pushHealth(buildHealthPushPayload()))
-
-  // Telemetry relay to other UDP tools (Moza Pit House, SimHub, …). F1 only
-  // sends to one target, so this agent must be that exclusive target and
-  // fan every raw packet back out — see udp/relay.ts for why.
-  const relayTargets = parseRelayTargets(config.forwardTargets)
-  const relay = new TelemetryRelay(relayTargets)
 
   // Local-only bridge for same-machine consumers (e.g. the input-trace
   // overlay) to subscribe to already-parsed telemetry. Best-effort — see
@@ -138,25 +141,18 @@ async function main(): Promise<void> {
     : () => {}
 
   const socket = startUdpListener(config.udpPort, config.udpBindAddress, {
-    onPacket: (buf) => {
-      // Header-only parse (cheap, works even for unsupported formats like a
-      // "2026 Season Pack" packet that parsePacket() below would discard) so
-      // health reporting always knows the real format in use, not just
-      // whichever ones PitWall currently understands.
-      telemetryHealth.onPacket(parseHeader(buf)?.packetFormat)
-      // Relay the raw, unparsed bytes immediately — downstream tools get an
-      // identical copy regardless of whether PitWall understands the packet.
-      relay.forward(buf)
-      try {
-        const result = parsePacket(buf, versionOverride)
-        if (result) {
+    onPacket: (buf, source) => {
+      processTelemetryDatagram(buf, source, {
+        health: telemetryHealth,
+        versionOverride,
+        relay: (packet) => relay.forward(packet),
+        onParsed: (result) => {
           lifecycle.feed(result)
           live.forward(result)
           overlayBridge.forward(result)
-        }
-      } catch (err) {
-        log.error(`Packet handling error: ${(err as Error).message}`)
-      }
+        },
+        onError: (err) => log.error(`Packet handling error: ${err.message}`),
+      })
     },
     onBindError: () => {
       telemetryHealth.onBindError()
@@ -173,7 +169,7 @@ async function main(): Promise<void> {
         'port and add it to FORWARD_TARGETS in agent settings — PitWall will relay telemetry to it.')
     },
     onListening: (address, port) => {
-      telemetryHealth.onListening(port)
+      telemetryHealth.onListening(port, address)
       tray.setState('IDLE')
     },
   })
@@ -193,6 +189,7 @@ async function main(): Promise<void> {
     try { stopOverlayPoll() } catch { /* ok */ }
     try { overlayBridge.close() } catch { /* ok */ }
     try { socket.close() } catch { /* ok */ }
+    try { sender.stop() } catch { /* ok */ }
     try { queue.close() } catch { /* ok */ }
     telemetryHealth.stop()
     releaseInstanceLock()

@@ -25,8 +25,17 @@ export type HealthState =
 export interface HealthSnapshot {
   state: HealthState
   boundPort: number | null
+  bindAddress: string | null
+  /** Backwards-compatible raw datagram count. */
   packetsReceived: number
+  datagramsReceived: number
+  validPacketsReceived: number
+  malformedPackets: number
+  unsupportedPackets: number
+  parserErrors: number
   lastPacketAt: number | null // epoch ms, null if never received one since the current bind
+  lastDatagramAt: number | null
+  lastValidPacketAt: number | null
   listeningSince: number | null // epoch ms
   uptimeMs: number
   // Read from the raw packet header even when the format is unsupported (see
@@ -36,6 +45,9 @@ export interface HealthSnapshot {
   // Packets/sec over the trailing RATE_WINDOW_MS, or null once telemetry
   // stops (decays via the tick() prune, not just on the next packet).
   packetRateHz: number | null
+  packetSource: { address: string; port: number } | null
+  sessionUid: string | null
+  playerVehicleIndex: number | null
 }
 
 // How long after a successful bind, with zero packets, before we say
@@ -51,15 +63,24 @@ const TICK_MS = 2_000
 // long enough that a couple of dropped UDP packets don't make the rate flap.
 const RATE_WINDOW_MS = 3_000
 
-class TelemetryHealth {
+export class TelemetryHealth {
   private state: HealthState = 'STARTING'
   private boundPort: number | null = null
+  private bindAddress: string | null = null
   private packetsReceived = 0
+  private validPacketsReceived = 0
+  private malformedPackets = 0
+  private unsupportedPackets = 0
+  private parserErrors = 0
   private lastPacketAt: number | null = null
+  private lastDatagramAt: number | null = null
   private listeningSince: number | null = null
   private readonly processStartedAt = Date.now()
   private timer: NodeJS.Timeout | null = null
   private packetFormat: number | null = null
+  private packetSource: { address: string; port: number } | null = null
+  private sessionUid: string | null = null
+  private playerVehicleIndex: number | null = null
   private packetTimestamps: number[] = []
   private stateChangeListeners: Array<(snapshot: HealthSnapshot) => void> = []
 
@@ -86,21 +107,41 @@ class TelemetryHealth {
     this.stateChangeListeners.push(cb)
   }
 
-  onListening(port: number): void {
+  onListening(port: number, address: string | null = null): void {
     this.boundPort = port
+    this.bindAddress = address
     this.listeningSince = Date.now()
     this.lastPacketAt = null
     this.setState('LISTENING')
     if (!this.timer) this.timer = setInterval(() => this.tick(), TICK_MS)
   }
 
-  onPacket(packetFormat?: number): void {
+  onDatagram(source?: { address: string; port: number }, packetFormat?: number): void {
     this.packetsReceived++
-    this.lastPacketAt = Date.now()
+    this.lastDatagramAt = Date.now()
+    if (source) this.packetSource = source
     if (packetFormat != null) this.packetFormat = packetFormat
+  }
+
+  onValidPacket(details?: { packetFormat?: number; sessionUid?: string; playerVehicleIndex?: number }): void {
+    this.validPacketsReceived++
+    this.lastPacketAt = Date.now()
+    if (details?.packetFormat != null) this.packetFormat = details.packetFormat
+    if (details?.sessionUid != null) this.sessionUid = details.sessionUid
+    if (details?.playerVehicleIndex != null) this.playerVehicleIndex = details.playerVehicleIndex
     this.packetTimestamps.push(this.lastPacketAt)
     this.pruneTimestamps()
     this.setState('RECEIVING')
+  }
+
+  onMalformedPacket(): void { this.malformedPackets++ }
+  onUnsupportedPacket(): void { this.unsupportedPackets++ }
+  onParserError(): void { this.parserErrors++ }
+
+  /** Compatibility helper for older call sites and tests. */
+  onPacket(packetFormat?: number): void {
+    this.onDatagram(undefined, packetFormat)
+    this.onValidPacket({ packetFormat })
   }
 
   onBindError(): void {
@@ -133,7 +174,8 @@ class TelemetryHealth {
     const now = Date.now()
     if (this.lastPacketAt == null) {
       if (this.listeningSince != null && now - this.listeningSince > WAITING_GRACE_MS) {
-        this.setState('WAITING_FOR_GAME')
+        if (this.state === 'WAITING_FOR_GAME') this.notifyListeners()
+        else this.setState('WAITING_FOR_GAME')
       } else {
         this.notifyListeners()
       }
@@ -148,12 +190,23 @@ class TelemetryHealth {
     return {
       state: this.state,
       boundPort: this.boundPort,
+      bindAddress: this.bindAddress,
       packetsReceived: this.packetsReceived,
+      datagramsReceived: this.packetsReceived,
+      validPacketsReceived: this.validPacketsReceived,
+      malformedPackets: this.malformedPackets,
+      unsupportedPackets: this.unsupportedPackets,
+      parserErrors: this.parserErrors,
       lastPacketAt: this.lastPacketAt,
+      lastDatagramAt: this.lastDatagramAt,
+      lastValidPacketAt: this.lastPacketAt,
       listeningSince: this.listeningSince,
       uptimeMs: Date.now() - this.processStartedAt,
       packetFormat: this.packetFormat,
       packetRateHz: this.packetTimestamps.length ? Math.round((this.packetTimestamps.length / (RATE_WINDOW_MS / 1000)) * 10) / 10 : null,
+      packetSource: this.packetSource,
+      sessionUid: this.sessionUid,
+      playerVehicleIndex: this.playerVehicleIndex,
     }
   }
 

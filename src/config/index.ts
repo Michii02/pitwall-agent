@@ -80,11 +80,12 @@ LOG_LEVEL=info
 LOG_MAX_SIZE_MB=10
 LOG_MAX_FILES=3
 
-# Comma-separated host:port list of OTHER telemetry tools to relay packets to
+# Comma-separated [!][name=]host:port list of OTHER telemetry tools to relay packets to
 # (e.g. Moza Pit House, SimHub). Point F1 25's UDP output at PitWall's UDP_PORT
 # above ONLY — F1 can only send to one target, so any other tool must receive
 # its copy from PitWall's relay instead of listening directly.
-FORWARD_TARGETS=127.0.0.1:20777
+# Prefix with ! to keep a target configured but disabled.
+FORWARD_TARGETS=Moza=127.0.0.1:20777
 
 # Local WebSocket bridge (127.0.0.1 only) broadcasting parsed steer/throttle/
 # brake to same-machine consumers (e.g. the input-trace overlay app). Never
