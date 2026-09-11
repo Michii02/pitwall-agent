@@ -38,6 +38,10 @@ export type AgentHealthPushPayload = HealthSnapshot & {
 // these pongs to arrive.
 const HEARTBEAT_INTERVAL_MS = 15_000
 const HEARTBEAT_TIMEOUT_MS = 35_000 // ~2.3x interval — tolerates one delayed pong under load
+// Full-grid Lap Data arrives many times per second. Opponent questions do not
+// need that rate, so carry the compact grid at most twice per second while the
+// player-only lap message continues at its existing cadence.
+const LIVE_GRID_INTERVAL_MS = 500
 
 export class LiveForwarder {
   private ws: WebSocket | null = null
@@ -45,6 +49,7 @@ export class LiveForwarder {
   private reconnectTimer: NodeJS.Timeout | null = null
   private pingInterval: NodeJS.Timeout | null = null
   private lastPongAt = 0
+  private lastGridSentAt = 0
   private readonly url: string
 
   constructor(
@@ -150,10 +155,13 @@ export class LiveForwarder {
   /** Convert a parsed packet to the legacy live-view shape and send it. */
   forward(result: ParseResult): void {
     if (!this.connected || !this.ws) return
-    const msg = toLegacyMessage(result)
+    const now = Date.now()
+    const includeGrid = result.packet.kind === 'lap' && now - this.lastGridSentAt >= LIVE_GRID_INTERVAL_MS
+    const msg = toLegacyMessage(result, includeGrid, now)
     if (!msg) return
     try {
       this.ws.send(JSON.stringify(msg))
+      if (includeGrid) this.lastGridSentAt = now
     } catch { /* socket closing */ }
   }
 
@@ -187,8 +195,7 @@ export class LiveForwarder {
 }
 
 /** Map agent packet shapes → the { type, timestamp, data } messages the browser expects. */
-function toLegacyMessage(result: ParseResult): object | null {
-  const ts = Date.now()
+export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Date.now()): object | null {
   const pkt = result.packet
   switch (pkt.kind) {
     case 'session':
@@ -205,6 +212,10 @@ function toLegacyMessage(result: ParseResult): object | null {
         },
       }
     case 'lap':
+      {
+      const player = pkt.grid?.find((entry) => entry.vehicleIndex === result.header.playerCarIndex)
+      const ahead = player ? pkt.grid?.find((entry) => entry.carPosition === player.carPosition - 1) : undefined
+      const behind = player ? pkt.grid?.find((entry) => entry.carPosition === player.carPosition + 1) : undefined
       return {
         type: 'lap', timestamp: ts,
         data: {
@@ -219,6 +230,32 @@ function toLegacyMessage(result: ParseResult): object | null {
           numPitStops: pkt.numPitStops,
           currentLapInvalid: pkt.lapInvalid ? 1 : 0,
           gridPosition: pkt.gridPosition,
+          driverStatus: pkt.driverStatus,
+          resultStatus: pkt.resultStatus,
+          playerVehicleIndex: result.header.playerCarIndex,
+          gapAheadMs: player?.gapAheadMs ?? null,
+          gapBehindMs: behind?.gapAheadMs ?? null,
+          aheadVehicleIndex: ahead?.vehicleIndex ?? null,
+          behindVehicleIndex: behind?.vehicleIndex ?? null,
+          ...(includeGrid && pkt.grid ? { grid: pkt.grid.map((entry) => ({
+            vehicleIndex: entry.vehicleIndex,
+            carPosition: entry.carPosition,
+            lapNumber: entry.lapNumber,
+            pitStatus: entry.pitStatus,
+            numPitStops: entry.numPitStops,
+            gapAheadMs: entry.gapAheadMs,
+            gapToLeaderMs: entry.gapToLeaderMs,
+          })) } : {}),
+        },
+      }
+      }
+    case 'participant':
+      return {
+        type: 'participants', timestamp: ts,
+        data: {
+          playerVehicleIndex: result.header.playerCarIndex,
+          participants: (pkt.grid ?? [{ vehicleIndex: result.header.playerCarIndex, driverName: pkt.driverName }])
+            .map((entry) => ({ vehicleIndex: entry.vehicleIndex, driverName: entry.driverName })),
         },
       }
     case 'carTelemetry':
@@ -243,14 +280,31 @@ function toLegacyMessage(result: ParseResult): object | null {
           actualTyreCompound: pkt.actualTyreCompound,
           visualTyreCompound: pkt.visualTyreCompound,
           tyresAgeLaps: pkt.tyresAgeLaps,
+          ersStoreEnergy: pkt.ersStoreEnergy,
+          ersDeployMode: pkt.ersDeployMode,
         },
       }
     case 'damage':
       return {
         type: 'motion', timestamp: ts,
-        data: { kind: 'damage', tyresWear: pkt.tyreWear },
+        data: {
+          kind: 'damage', tyresWear: pkt.tyreWear,
+          frontLeftWing: pkt.frontLeftWing,
+          frontRightWing: pkt.frontRightWing,
+          rearWing: pkt.rearWing,
+          floor: pkt.floor,
+          diffuser: pkt.diffuser,
+          sidepod: pkt.sidepod,
+          gearbox: pkt.gearbox,
+          engine: pkt.engine,
+        },
+      }
+    case 'history':
+      return {
+        type: 'history', timestamp: ts,
+        data: { bestLapNumber: pkt.bestLapNumber, laps: pkt.laps },
       }
     default:
-      return null // events, setup, history, classification — not needed live
+      return null // events, setup, grid history, classification — not needed live
   }
 }

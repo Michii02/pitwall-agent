@@ -11,6 +11,7 @@ import './packet-processing.test'
 import './listener.test'
 import './relay.test'
 import './offline-sync.test'
+import './live.test'
 
 configureLogger({
   level: 'error',
