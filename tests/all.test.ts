@@ -12,6 +12,7 @@ import './listener.test'
 import './relay.test'
 import './offline-sync.test'
 import './live.test'
+import './grid-status.test'
 
 configureLogger({
   level: 'error',

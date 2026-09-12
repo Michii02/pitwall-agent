@@ -107,6 +107,7 @@ export interface LapPacket {
   carPosition: number
   gridPosition: number
   numPitStops: number
+  penaltiesSeconds: number
   sector: number // 0=S1, 1=S2, 2=S3 — which sector the car is currently in
   lapDistance: number // metres travelled around the current lap
   /** Race Grid Intelligence: every car in this packet — see
@@ -127,6 +128,7 @@ export interface LapGridEntry {
   lapNumber: number
   pitStatus: number
   numPitStops: number
+  penaltiesSeconds: number
   lapInvalid: boolean
   driverStatus: number
   resultStatus: number
@@ -238,6 +240,16 @@ export interface StatusPacket {
   ersDeployMode: number         // 0 none, 1 medium, 2 hotlap, 3 overtake
   ersDeployedThisLap: number    // Joules deployed this lap
   ersHarvestedThisLap: number   // Joules harvested this lap (MGU-K + MGU-H)
+  vehicleFiaFlags: number
+  grid?: StatusGridEntry[]
+}
+
+export interface StatusGridEntry {
+  vehicleIndex: number
+  fuelInTank: number
+  actualTyreCompound: number
+  visualTyreCompound: number
+  tyresAgeLaps: number
   vehicleFiaFlags: number
 }
 

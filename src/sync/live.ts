@@ -38,9 +38,9 @@ export type AgentHealthPushPayload = HealthSnapshot & {
 // these pongs to arrive.
 const HEARTBEAT_INTERVAL_MS = 15_000
 const HEARTBEAT_TIMEOUT_MS = 35_000 // ~2.3x interval — tolerates one delayed pong under load
-// Full-grid Lap Data arrives many times per second. Opponent questions do not
-// need that rate, so carry the compact grid at most twice per second while the
-// player-only lap message continues at its existing cadence.
+// Full-grid Lap and Car Status data arrive many times per second. Opponent
+// questions do not need that rate, so carry each grid family at most twice per
+// second while the player-only lap message continues at its existing cadence.
 const LIVE_GRID_INTERVAL_MS = 500
 
 export class LiveForwarder {
@@ -49,7 +49,8 @@ export class LiveForwarder {
   private reconnectTimer: NodeJS.Timeout | null = null
   private pingInterval: NodeJS.Timeout | null = null
   private lastPongAt = 0
-  private lastGridSentAt = 0
+  private lastLapGridSentAt = 0
+  private lastStatusGridSentAt = 0
   private readonly url: string
 
   constructor(
@@ -156,12 +157,17 @@ export class LiveForwarder {
   forward(result: ParseResult): void {
     if (!this.connected || !this.ws) return
     const now = Date.now()
-    const includeGrid = result.packet.kind === 'lap' && now - this.lastGridSentAt >= LIVE_GRID_INTERVAL_MS
+    const gridClock = result.packet.kind === 'lap'
+      ? this.lastLapGridSentAt
+      : result.packet.kind === 'status' ? this.lastStatusGridSentAt : now
+    const includeGrid = (result.packet.kind === 'lap' || result.packet.kind === 'status')
+      && now - gridClock >= LIVE_GRID_INTERVAL_MS
     const msg = toLegacyMessage(result, includeGrid, now)
     if (!msg) return
     try {
       this.ws.send(JSON.stringify(msg))
-      if (includeGrid) this.lastGridSentAt = now
+      if (includeGrid && result.packet.kind === 'lap') this.lastLapGridSentAt = now
+      if (includeGrid && result.packet.kind === 'status') this.lastStatusGridSentAt = now
     } catch { /* socket closing */ }
   }
 
@@ -228,6 +234,7 @@ export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Da
           lapNumber: pkt.lapNumber,
           pitStatus: pkt.pitStatus,
           numPitStops: pkt.numPitStops,
+          penaltiesSeconds: pkt.penaltiesSeconds,
           currentLapInvalid: pkt.lapInvalid ? 1 : 0,
           gridPosition: pkt.gridPosition,
           driverStatus: pkt.driverStatus,
@@ -243,6 +250,14 @@ export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Da
             lapNumber: entry.lapNumber,
             pitStatus: entry.pitStatus,
             numPitStops: entry.numPitStops,
+            penaltiesSeconds: entry.penaltiesSeconds,
+            lastLapMs: entry.lastLapMs,
+            currentLapMs: entry.currentLapMs,
+            lapInvalid: entry.lapInvalid,
+            driverStatus: entry.driverStatus,
+            resultStatus: entry.resultStatus,
+            gridPosition: entry.gridPosition,
+            totalDistance: entry.totalDistance,
             gapAheadMs: entry.gapAheadMs,
             gapToLeaderMs: entry.gapToLeaderMs,
           })) } : {}),
@@ -282,6 +297,7 @@ export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Da
           tyresAgeLaps: pkt.tyresAgeLaps,
           ersStoreEnergy: pkt.ersStoreEnergy,
           ersDeployMode: pkt.ersDeployMode,
+          ...(includeGrid && pkt.grid ? { grid: pkt.grid } : {}),
         },
       }
     case 'damage':

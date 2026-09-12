@@ -11,7 +11,7 @@ import {
   PACKET, playerOffset, tyreArray,
   type ParsedHeader, type ParsedPacket, type VersionLayout, type GameVersion,
   type ParticipantPacket, type LapPacket, type ClassificationPacket,
-  type ParticipantGridEntry, type LapGridEntry, type ClassificationGridEntry,
+  type ParticipantGridEntry, type LapGridEntry, type ClassificationGridEntry, type StatusPacket, type StatusGridEntry,
 } from './packets/common'
 import { F1_2023 } from './packets/f1-2023'
 import { F1_2024 } from './packets/f1-2024'
@@ -101,7 +101,10 @@ export function parsePacket(buf: Buffer, versionOverride?: GameVersion): ParseRe
       break
     case PACKET.CAR_SETUPS: packet = parseSetup(buf, p, layout); break
     case PACKET.CAR_TELEMETRY: packet = parseCarTelemetry(buf, p); break
-    case PACKET.CAR_STATUS: packet = parseStatus(buf, p, layout); break
+    case PACKET.CAR_STATUS:
+      packet = parseStatus(buf, p, layout)
+      if (packet) (packet as StatusPacket).grid = parseStatusGrid(buf, layout) ?? undefined
+      break
     case PACKET.FINAL_CLASSIFICATION:
       packet = parseClassification(buf, p, layout) // unchanged — player slot only
       if (packet) (packet as ClassificationPacket).grid = parseClassificationGrid(buf, layout) ?? undefined
@@ -177,6 +180,7 @@ function parseLap(buf: Buffer, p: number, l: VersionLayout): ParsedPacket | null
     lapNumber: buf.readUInt8(base + 33),
     pitStatus: buf.readUInt8(base + 34),
     numPitStops: buf.readUInt8(base + 35),
+    penaltiesSeconds: buf.readUInt8(base + 38),
     sector: buf.readUInt8(base + 36), // 0/1/2
     lapDistance: buf.readFloatLE(base + 20), // metres into the lap
     lapInvalid: buf.readUInt8(base + 37) === 1,
@@ -216,6 +220,7 @@ function parseLapDataGrid(buf: Buffer, l: VersionLayout): LapGridEntry[] | null 
       lapNumber: buf.readUInt8(base + 33),
       pitStatus: buf.readUInt8(base + 34),
       numPitStops: buf.readUInt8(base + 35),
+      penaltiesSeconds: buf.readUInt8(base + 38),
       lapInvalid: buf.readUInt8(base + 37) === 1,
       driverStatus: buf.readUInt8(base + 44),
       resultStatus: buf.readUInt8(base + 45),
@@ -392,6 +397,23 @@ function parseStatus(buf: Buffer, p: number, l: VersionLayout): ParsedPacket | n
     ersHarvestedThisLap: buf.readFloatLE(base + 42) + buf.readFloatLE(base + 46),
     ersDeployedThisLap: buf.readFloatLE(base + 50),
   }
+}
+
+function parseStatusGrid(buf: Buffer, l: VersionLayout): StatusGridEntry[] | null {
+  const entries: StatusGridEntry[] = []
+  for (let i = 0; i < 22; i++) {
+    const base = playerOffset(i, l.carStatusSize)
+    if (buf.length < base + l.carStatusSize) break
+    entries.push({
+      vehicleIndex: i,
+      fuelInTank: buf.readFloatLE(base + 5),
+      actualTyreCompound: buf.readUInt8(base + 25),
+      visualTyreCompound: buf.readUInt8(base + 26),
+      tyresAgeLaps: buf.readUInt8(base + 27),
+      vehicleFiaFlags: buf.readInt8(base + 28),
+    })
+  }
+  return entries.length ? entries : null
 }
 
 let loggedDamageLayout = false
