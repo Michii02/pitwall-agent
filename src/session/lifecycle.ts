@@ -53,6 +53,18 @@ export class SessionLifecycle {
   constructor(private events: LifecycleEvents, private captureProfile?: CaptureProfile) {}
 
   get currentState(): AgentState { return this.state }
+  updateCaptureProfile(profile: CaptureProfile): void {
+    this.captureProfile = profile
+    this.collector?.updateCaptureProfile(profile)
+  }
+
+  /** Conservative source/UID transition: preserve old capture as incomplete. */
+  resetForSourceTransition(): void {
+    this.endSession(true)
+    this.lastSessionPacket = null
+    this.gameVersion = null
+    this.setState('CONNECTED')
+  }
   get sessionDetail(): string | null {
     if (!this.collector) return null
     return `${this.collector.record.track_name} · Lap ${this.collector.currentLap}`

@@ -1,15 +1,18 @@
 import type { TelemetryHealth } from '../health/state'
 import type { GameVersion } from './packets/common'
 import type { ParseResult } from './parser'
+import type { ParsedHeader } from './packets/common'
 import { isIntentionallyIgnoredPacket, isSupportedPacketFormat, parseHeader, parsePacket } from './parser'
 
-export type PacketDisposition = 'parsed' | 'ignored' | 'malformed' | 'unsupported' | 'parser_error'
+export type PacketDisposition = 'parsed' | 'ignored' | 'malformed' | 'unsupported' | 'parser_error' | 'conflict'
 
 export interface PacketProcessingDependencies {
   health: TelemetryHealth
   versionOverride?: GameVersion
   relay: (buf: Buffer) => void
   onParsed: (result: ParseResult) => void
+  acceptParsed?: (result: ParseResult) => boolean
+  acceptIgnored?: (header: ParsedHeader) => boolean
   onError?: (error: Error) => void
 }
 
@@ -31,6 +34,7 @@ export function processTelemetryDatagram(
   try {
     const result = parsePacket(buf, versionOverride)
     if (result) {
+      if (dependencies.acceptParsed && !dependencies.acceptParsed(result)) return 'conflict'
       health.onValidPacket({
         packetFormat: result.header.packetFormat,
         sessionUid: result.header.sessionUid,
@@ -48,6 +52,7 @@ export function processTelemetryDatagram(
       return 'unsupported'
     }
     if (isIntentionallyIgnoredPacket(header.packetId, header.packetFormat, versionOverride)) {
+      if (dependencies.acceptIgnored && !dependencies.acceptIgnored(header)) return 'conflict'
       health.onValidPacket({
         packetFormat: header.packetFormat,
         sessionUid: header.sessionUid,

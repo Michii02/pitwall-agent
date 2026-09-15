@@ -157,7 +157,9 @@ export interface GridPositionSnapshot {
  */
 export interface CaptureProfile {
   platform: 'PC' | 'PLAYSTATION' | 'XBOX' | 'UNKNOWN'
-  captureMethod: 'PC_NATIVE' | 'CONSOLE_DESKTOP'
+  captureMethod: 'PC_NATIVE' | 'CONSOLE_DESKTOP' | null
+  platformOrigin?: 'detected' | 'user_selected' | 'inferred' | 'unknown'
+  sourceDeviceId?: string | null
 }
 
 export interface ProximitySnapshot {
@@ -193,7 +195,9 @@ export interface SessionRecord {
    *  reported honestly as a setting rather than inferred. Defaults keep every
    *  existing PC install behaving exactly as before. */
   platform: 'PC' | 'PLAYSTATION' | 'XBOX' | 'UNKNOWN'
-  capture_method: 'PC_NATIVE' | 'CONSOLE_DESKTOP'
+  capture_method: 'PC_NATIVE' | 'CONSOLE_DESKTOP' | null
+  platform_origin?: CaptureProfile['platformOrigin']
+  source_device_id?: string | null
   track_id: number
   track_name: string
   session_type: string
@@ -302,7 +306,9 @@ export class SessionCollector {
       // sets a profile keeps reporting PC / PC_NATIVE, which is what every
       // session before this change effectively was.
       platform: captureProfile?.platform ?? 'PC',
-      capture_method: captureProfile?.captureMethod ?? 'PC_NATIVE',
+      capture_method: captureProfile ? captureProfile.captureMethod : 'PC_NATIVE',
+      platform_origin: captureProfile?.platformOrigin,
+      source_device_id: captureProfile?.sourceDeviceId ?? null,
       track_id: session.trackId,
       track_name: TRACK_NAMES[session.trackId] ?? `Track ${session.trackId}`,
       session_type: SESSION_TYPE_NAMES[session.sessionType] ?? 'unknown',
@@ -394,6 +400,13 @@ export class SessionCollector {
    *  read" convention already used elsewhere in this class. */
   updateSessionUid(uid: string): void {
     if (!this.record.session_uid && uid) this.record.session_uid = uid
+  }
+
+  updateCaptureProfile(profile: CaptureProfile): void {
+    this.record.platform = profile.platform
+    this.record.capture_method = profile.captureMethod
+    this.record.platform_origin = profile.platformOrigin
+    this.record.source_device_id = profile.sourceDeviceId ?? null
   }
 
   /** Full replace, last-write-wins per vehicle slot (matches updateParticipant's

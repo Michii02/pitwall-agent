@@ -32,6 +32,8 @@ export interface AgentConfig {
   udpBindAddress: string
   /** Where the driver races. Declared, never inferred — see DEFAULT_ENV. */
   capturePlatform: 'PC' | 'PLAYSTATION' | 'XBOX'
+  /** Explicit override; default false enables verified platform recognition. */
+  capturePlatformOverride?: boolean
   gameVersion: 'auto' | 'f1_2023' | 'f1_2024' | 'f1_2025'
   logLevel: 'debug' | 'info' | 'warn' | 'error'
   logMaxSizeMb: number
@@ -220,6 +222,7 @@ export function loadConfig(): AgentConfig {
       ? (process.env.CAPTURE_PLATFORM as string).toUpperCase()
       : 'PC') as AgentConfig['capturePlatform'],
     gameVersion: ['auto', 'f1_2023', 'f1_2024', 'f1_2025'].includes(gameVersion) ? gameVersion : 'auto',
+    capturePlatformOverride: process.env.CAPTURE_PLATFORM_OVERRIDE === 'true',
     logLevel: (['debug', 'info', 'warn', 'error'].includes(process.env.LOG_LEVEL ?? '') ? process.env.LOG_LEVEL : 'info') as AgentConfig['logLevel'],
     logMaxSizeMb: Number(process.env.LOG_MAX_SIZE_MB ?? 10),
     logMaxFiles: Number(process.env.LOG_MAX_FILES ?? 3),

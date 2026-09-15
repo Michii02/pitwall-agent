@@ -13,6 +13,7 @@ import './relay.test'
 import './offline-sync.test'
 import './live.test'
 import './grid-status.test'
+import './sources.test'
 
 configureLogger({
   level: 'error',

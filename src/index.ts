@@ -21,13 +21,16 @@ import { SyncSender } from './sync/sender'
 import { LiveForwarder } from './sync/live'
 import { TrayManager, openLogsInNotepad, openSettingsFile } from './tray/icon'
 import type { GameVersion } from './udp/packets/common'
+import path from 'node:path'
+import { TelemetrySourceManager } from './sources/manager'
 
-const AGENT_VERSION = '1.0.1'
+const AGENT_VERSION = '1.0.2'
 const ERROR_STATE_AFTER_MS = 30 * 60_000
 const QUEUE_WARNING_THRESHOLD = 50
 
 async function main(): Promise<void> {
   const config = loadConfig()
+  const sources = new TelemetrySourceManager(path.join(APP_DIR, 'known-sources.json'), (error) => log.warn(`Source configuration could not be saved: ${error.message}`))
   configureLogger({ level: config.logLevel, maxSizeMb: config.logMaxSizeMb, maxFiles: config.logMaxFiles })
 
   log.info(`PitWall Agent v${AGENT_VERSION} starting · API ${config.apiUrl} · UDP ${config.udpBindAddress}:${config.udpPort}`)
@@ -101,8 +104,7 @@ async function main(): Promise<void> {
   }, {
     // Capture provenance (League Session Intelligence MVP 1.1). The capture
     // path is identical for PC and console — this only labels the session.
-    platform: config.capturePlatform,
-    captureMethod: config.capturePlatform === 'PC' ? 'PC_NATIVE' : 'CONSOLE_DESKTOP',
+    ...sources.captureProfile,
   })
 
   const versionOverride: GameVersion | undefined =
@@ -122,6 +124,7 @@ async function main(): Promise<void> {
     ...telemetryHealth.snapshot(),
     network: detectAgentNetworkInfo(),
     capturePlatform: config.capturePlatform,
+    sources: sources.snapshot(),
     recording: lifecycle.snapshot,
     forwarding: relay.snapshot(),
     queueDepth: queue.pendingCount(),
@@ -146,6 +149,15 @@ async function main(): Promise<void> {
         health: telemetryHealth,
         versionOverride,
         relay: (packet) => relay.forward(packet),
+        acceptIgnored: (header) => sources.acceptsAuxiliaryPacket(header.sessionUid, source.address, lifecycle.snapshot.active),
+        acceptParsed: (result) => {
+          const decision = sources.observe(result, source.address, lifecycle.snapshot.active,
+            config.capturePlatformOverride ? config.capturePlatform : undefined, Date.now(), versionOverride !== undefined)
+          if (!decision.accepted) return false
+          if (decision.transition) lifecycle.resetForSourceTransition()
+          lifecycle.updateCaptureProfile(sources.captureProfile)
+          return true
+        },
         onParsed: (result) => {
           lifecycle.feed(result)
           live.forward(result)
@@ -193,7 +205,7 @@ async function main(): Promise<void> {
     try { queue.close() } catch { /* ok */ }
     telemetryHealth.stop()
     releaseInstanceLock()
-    process.exit(code)
+    void sources.flush().finally(() => process.exit(code))
   }
 
   process.on('SIGINT', () => shutdown(0))
