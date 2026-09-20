@@ -20,6 +20,8 @@ export interface TrayCallbacks {
   onQuit: () => void
   getPendingCount: () => number
   getSessionDetail: () => string | null
+  onFinishInterruptedCapture?: () => void
+  canFinishInterruptedCapture?: () => boolean
 }
 
 // 16×16 solid-colour PNGs, base64 — grey/green/red/amber/red-exclaim states.
@@ -87,6 +89,7 @@ export class TrayManager {
           case 'logs': this.callbacks.onOpenLogs(); break
           case 'settings': this.callbacks.onOpenSettings(); break
           case 'quit': this.callbacks.onQuit(); break
+          case 'finish-interrupted': this.callbacks.onFinishInterruptedCapture?.(); break
         }
       })
       log.info('System tray started')
@@ -132,6 +135,7 @@ $t.GetElementsByTagName('text').Item(1).AppendChild($t.CreateTextNode('${message
         item(`PitWall Agent v${this.version} · ${stateLabel(state)}`, false, 'status'),
         item('<SEPARATOR>', false, ''),
         item(detail ? `Session active · ${detail}` : 'No active session', false, 'session'),
+        item('Finish interrupted session', this.callbacks.canFinishInterruptedCapture?.() ?? false, 'finish-interrupted'),
         item('<SEPARATOR>', false, ''),
         item('Sync now', pending > 0, 'sync'),
         item(`View sync queue (${pending} pending)`, pending > 0, 'queue'),

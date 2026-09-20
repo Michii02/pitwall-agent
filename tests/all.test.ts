@@ -14,6 +14,7 @@ import './offline-sync.test'
 import './live.test'
 import './grid-status.test'
 import './sources.test'
+import './recovery.test'
 
 configureLogger({
   level: 'error',

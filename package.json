@@ -1,6 +1,6 @@
 {
   "name": "pitwall-agent",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "PitWall UDP Agent — background F1 telemetry capture and sync service for Windows",
   "private": true,
   "main": "dist/index.js",

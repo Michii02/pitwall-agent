@@ -22,6 +22,7 @@ import { LiveForwarder } from './sync/live'
 import { TrayManager, openLogsInNotepad, openSettingsFile } from './tray/icon'
 import type { GameVersion } from './udp/packets/common'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { TelemetrySourceManager } from './sources/manager'
 
 const AGENT_VERSION = '1.0.2'
@@ -50,6 +51,13 @@ async function main(): Promise<void> {
   }
 
   const queue = new SessionQueue()
+  const ownerFingerprint = createHash('sha256').update(config.agentToken).digest('hex')
+  let recovery = queue.loadActiveCheckpoint()
+  if (recovery && recovery.ownerFingerprint !== ownerFingerprint) {
+    queue.quarantineActiveCheckpoint(recovery.collector.record.id, 'Pairing owner changed')
+    log.warn('Previous active capture belongs to a different pairing; retained locally')
+    recovery = null
+  }
 
   let firstSyncNotified = false
   const tray = new TrayManager({
@@ -62,6 +70,8 @@ async function main(): Promise<void> {
     },
     getPendingCount: () => queue.pendingCount(),
     getSessionDetail: () => lifecycle.sessionDetail,
+    canFinishInterruptedCapture: () => lifecycle.canFinishInterruptedCapture,
+    onFinishInterruptedCapture: () => lifecycle.finishInterruptedCapture(),
   }, AGENT_VERSION)
 
   const sender = new SyncSender(queue, config, {
@@ -97,6 +107,17 @@ async function main(): Promise<void> {
       live.pushSnapshot()
     },
     onSessionComplete: (record) => sender.submit(record),
+    onCaptureFinalized: (record) => queue.completeActiveSession(record),
+    onCheckpoint: () => {
+      tray.setState(lifecycle.currentState) // refresh the interrupted-session action
+      const address = sources.senderAddress
+      if (!address) return
+      const checkpoint = lifecycle.createCheckpoint(address, ownerFingerprint)
+      if (checkpoint) {
+        try { queue.saveActiveCheckpoint(checkpoint) }
+        catch (error) { log.warn(`Active capture could not be checkpointed: ${(error as Error).message}`) }
+      }
+    },
     onLapComplete: () => {
       tray.setState('SESSION_ACTIVE') // refreshes "Lap N" in menu
       live.pushSnapshot()
@@ -151,9 +172,14 @@ async function main(): Promise<void> {
         relay: (packet) => relay.forward(packet),
         acceptIgnored: (header) => sources.acceptsAuxiliaryPacket(header.sessionUid, source.address, lifecycle.snapshot.active),
         acceptParsed: (result) => {
+          if (recovery && result.packet.kind !== 'session') return false
           const decision = sources.observe(result, source.address, lifecycle.snapshot.active,
             config.capturePlatformOverride ? config.capturePlatform : undefined, Date.now(), versionOverride !== undefined)
           if (!decision.accepted) return false
+          if (recovery) {
+            lifecycle.restoreRecovery(recovery, result, source.address)
+            recovery = null
+          }
           if (decision.transition) lifecycle.resetForSourceTransition()
           lifecycle.updateCaptureProfile(sources.captureProfile)
           return true
@@ -202,6 +228,7 @@ async function main(): Promise<void> {
     try { overlayBridge.close() } catch { /* ok */ }
     try { socket.close() } catch { /* ok */ }
     try { sender.stop() } catch { /* ok */ }
+    try { lifecycle.stop() } catch { /* ok */ }
     try { queue.close() } catch { /* ok */ }
     telemetryHealth.stop()
     releaseInstanceLock()

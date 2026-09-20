@@ -50,6 +50,7 @@ export class TelemetrySourceManager {
   }
 
   get captureProfile(): CaptureProfile { return { ...this.current } }
+  get senderAddress(): string | null { return this.activeAddress }
 
   observe(result: ParseResult, address: string, activeSession: boolean, override?: Platform, now = Date.now(), layoutOverride = false): { accepted: boolean; transition: boolean } {
     const uid = result.header.sessionUid

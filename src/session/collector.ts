@@ -51,6 +51,7 @@ export interface StintRecord {
 }
 
 export interface TelemetrySample {
+  gap_before?: boolean
   t: number          // ms since session start
   lap: number | null
   d: number | null   // lap distance (m)
@@ -174,6 +175,7 @@ export interface ProximitySnapshot {
 }
 
 export interface SessionRecord {
+  telemetry_gaps?: RecordedTelemetryGap[]
   id: string
   source: 'udp_agent'
   game_version: GameVersion
@@ -247,6 +249,22 @@ export interface SessionRecord {
 
 type Wear = { fl: number; fr: number; rl: number; rr: number }
 
+export interface RecordedTelemetryGap {
+  start_received_at_ms: number
+  end_received_at_ms: number | null
+  reason: 'silence' | 'agent_restart'
+  start_sample_time_ms: number
+  end_sample_time_ms: number | null
+}
+export interface CollectorRecoveryState {
+  record: SessionRecord
+  sessionStartMs: number
+  lastLapNumber: number
+  lastLapMs: number
+  lastPitStatus: number
+  stintStartLap: number
+}
+
 const DAMAGE_LOG_INTERVAL = 5 // laps
 // Downsample throttle/brake capture: at most one sample per this interval, and
 // hard-cap the total so a long race can't produce an unbounded payload.
@@ -285,6 +303,7 @@ export class SessionCollector {
   private currentLapDistance: number | null = null
   private sessionStartMs = Date.now()
   private lastSampleMs = 0
+  private gapBeforeNextSample = false
   private lastProximitySampleMs = 0
   private safetyCarActive = false
   private safetyCarThisLap = false
@@ -403,10 +422,52 @@ export class SessionCollector {
   }
 
   updateCaptureProfile(profile: CaptureProfile): void {
+    if (profile.platform === 'UNKNOWN' && this.record.platform !== 'UNKNOWN') return
     this.record.platform = profile.platform
     this.record.capture_method = profile.captureMethod
     this.record.platform_origin = profile.platformOrigin
     this.record.source_device_id = profile.sourceDeviceId ?? null
+  }
+
+  recoveryState(): CollectorRecoveryState {
+    return { record: structuredClone(this.record), sessionStartMs: this.sessionStartMs,
+      lastLapNumber: this.lastLapNumber, lastLapMs: this.lastLapMs,
+      lastPitStatus: this.lastPitStatus, stintStartLap: this.stintStartLap }
+  }
+
+  static restore(game: GameVersion, session: SessionPacket, state: CollectorRecoveryState): SessionCollector {
+    const collector = new SessionCollector(game, session)
+    Object.assign(collector.record, structuredClone(state.record))
+    collector.sessionStartMs = state.sessionStartMs
+    collector.lastLapNumber = state.lastLapNumber
+    collector.lastLapMs = state.lastLapMs
+    collector.lastPitStatus = state.lastPitStatus
+    collector.stintStartLap = state.stintStartLap
+    collector.gapBeforeNextSample = true
+    return collector
+  }
+
+  openGap(lastAcceptedAt: number, reason: RecordedTelemetryGap['reason']): void {
+    const gaps = this.record.telemetry_gaps ??= []
+    if (gaps.at(-1)?.end_received_at_ms === null) return
+    if (gaps.length < 1000) gaps.push({ start_received_at_ms: lastAcceptedAt, end_received_at_ms: null, reason,
+      start_sample_time_ms: Math.max(0, lastAcceptedAt - this.sessionStartMs), end_sample_time_ms: null })
+    this.gapBeforeNextSample = true
+    this.sector1Ms = null; this.sector2Ms = null
+    this.lastLapEndPosition = null
+    this.currentWear = null; this.currentDamage = null; this.prevWingDamage = null
+    this.currentFuel = null; this.currentTyreAge = null
+    this.currentErsStore = null; this.currentErsMode = null
+    this.currentTyreTemp = null; this.currentTyreInnerTemp = null; this.currentTyrePressure = null
+    this.currentCarPosition = null; this.currentLapDistance = null
+    this.latestLapGrid = null
+  }
+
+  closeGap(now: number): void {
+    const gap = this.record.telemetry_gaps?.at(-1)
+    if (!gap || gap.end_received_at_ms !== null || now <= gap.start_received_at_ms) return
+    gap.end_received_at_ms = now
+    gap.end_sample_time_ms = Math.max(0, now - this.sessionStartMs)
   }
 
   /** Full replace, last-write-wins per vehicle slot (matches updateParticipant's
@@ -618,6 +679,7 @@ export class SessionCollector {
     this.lastSampleMs = now
     const samples = this.record.telemetry_samples
     const sample: TelemetrySample = {
+      ...(this.gapBeforeNextSample ? { gap_before: true } : {}),
       t: now - this.sessionStartMs,
       lap: this.lastLapNumber || null,
       d: this.currentLapDistance,
@@ -634,10 +696,19 @@ export class SessionCollector {
     if (this.currentTyreTemp) sample.tS = this.currentTyreTemp
     if (this.currentTyrePressure) sample.prs = this.currentTyrePressure
     samples.push(sample)
+    this.gapBeforeNextSample = false
     // Hard cap: if we hit the ceiling, thin by dropping every other sample so
     // the trace still spans the whole session rather than truncating it.
     if (samples.length > MAX_SAMPLES) {
-      this.record.telemetry_samples = samples.filter((_, i) => i % 2 === 0)
+      let pendingGap = false
+      this.record.telemetry_samples = samples.filter((sample, i) => {
+        pendingGap ||= sample.gap_before === true
+        if (i % 2 !== 0) return false
+        if (pendingGap) sample.gap_before = true
+        pendingGap = false
+        return true
+      })
+      this.gapBeforeNextSample = pendingGap
     }
   }
 
@@ -686,7 +757,7 @@ export class SessionCollector {
       const s3 = s1 && s2 ? Math.max(0, lap.lastLapMs - s1 - s2) : 0
 
       const rec: LapRecord = {
-        lap_number: this.lastLapNumber || lap.lapNumber - 1 || 1,
+        lap_number: lap.lapNumber - 1 || 1,
         lap_time_ms: lap.lastLapMs,
         sector_1_ms: s1,
         sector_2_ms: s2,
