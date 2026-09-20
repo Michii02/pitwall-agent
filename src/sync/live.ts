@@ -17,6 +17,7 @@ import type { AgentConfig } from '../config'
 import type { HealthSnapshot } from '../health/state'
 import type { AgentNetworkInfo } from '../network/interfaces'
 import { log } from '../utils/logger'
+import { TEAM_NAMES } from '../udp/packets/common'
 
 // MVP1 Phase 1f — network interfaces and the currently-configured capture
 // platform are a different axis from health/state.ts's UDP-signal-driven
@@ -269,8 +270,14 @@ export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Da
         type: 'participants', timestamp: ts,
         data: {
           playerVehicleIndex: result.header.playerCarIndex,
-          participants: (pkt.grid ?? [{ vehicleIndex: result.header.playerCarIndex, driverName: pkt.driverName }])
-            .map((entry) => ({ vehicleIndex: entry.vehicleIndex, driverName: entry.driverName })),
+          participants: (pkt.grid ?? [{ vehicleIndex: result.header.playerCarIndex, driverName: pkt.driverName, teamId: pkt.teamId, raceNumber: pkt.raceNumber }])
+            .map((entry) => ({
+              vehicleIndex: entry.vehicleIndex,
+              driverName: entry.driverName,
+              teamId: entry.teamId,
+              teamName: TEAM_NAMES[entry.teamId] ?? null,
+              raceNumber: entry.raceNumber,
+            })),
         },
       }
     case 'carTelemetry':
