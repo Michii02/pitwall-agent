@@ -377,7 +377,9 @@ export class SessionCollector {
     // a later null (which would happen for every non-F1-25 packet since
     // parseSession only ever resolves it for that one verified version).
     if (this.record.ai_difficulty == null && s.aiDifficulty != null) this.record.ai_difficulty = s.aiDifficulty
-    const scNow = s.safetyCarStatus > 0
+    // Formation lap (3) is a distinct session state, not a Safety Car/VSC
+    // period. Only explicit full-SC/VSC values neutralise a recorded lap.
+    const scNow = s.safetyCarStatus === 1 || s.safetyCarStatus === 2
     if (scNow && !this.safetyCarActive) log.info(`Safety car status → ${s.safetyCarStatus}`)
     this.safetyCarActive = scNow
     if (scNow) this.safetyCarThisLap = true

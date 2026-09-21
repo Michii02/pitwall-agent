@@ -309,6 +309,7 @@ export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Da
           ersDeployMode: pkt.ersDeployMode,
           ersDeployedThisLap: pkt.ersDeployedThisLap,
           ersHarvestedThisLap: pkt.ersHarvestedThisLap,
+          vehicleFiaFlags: pkt.vehicleFiaFlags,
           ...(includeGrid && pkt.grid ? { grid: pkt.grid } : {}),
         },
       }

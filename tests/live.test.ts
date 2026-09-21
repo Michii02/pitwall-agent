@@ -61,6 +61,7 @@ test('live status and damage payloads carry deterministic engineer fields', () =
   assert.equal(status.ersStoreEnergy, 3_000_000)
   assert.equal(status.ersDeployedThisLap, 0)
   assert.equal(status.ersHarvestedThisLap, 0)
+  assert.equal(status.vehicleFiaFlags, 0)
   assert.deepEqual(status.grid, [{ vehicleIndex: 7, fuelInTank: 17, actualTyreCompound: 16, visualTyreCompound: 16, tyresAgeLaps: 4, vehicleFiaFlags: 1 }])
 
   const statusWithoutGrid = dataOf(toLegacyMessage({

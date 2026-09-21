@@ -15,6 +15,7 @@ import './live.test'
 import './grid-status.test'
 import './sources.test'
 import './recovery.test'
+import './track-state.test'
 
 configureLogger({
   level: 'error',
