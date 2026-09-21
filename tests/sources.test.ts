@@ -40,6 +40,21 @@ test('known platform identity survives restart and a changed address without cla
     await restored.flush()
   })
 })
+test('wizard registration persists an offline source without overriding detected capture', async () => {
+  await withRegistry(async (manager, file) => {
+    const configured = manager.registerConfiguredSource('PLAYSTATION')
+    assert.equal(configured.lastSeenAt, null)
+    assert.equal(manager.captureProfile.platform, 'UNKNOWN')
+    assert.equal(manager.snapshot().sources[0].state, 'offline')
+    await manager.flush()
+    const restored = new TelemetrySourceManager(file)
+    assert.equal(restored.snapshot().sources[0].sourceId, configured.sourceId)
+    restored.observe(fixture(3), 'console', false, undefined, 100)
+    assert.equal(restored.captureProfile.sourceDeviceId, configured.sourceId)
+    assert.equal(restored.captureProfile.platformOrigin, 'detected')
+    await restored.flush()
+  })
+})
 test('unknown, opponent, invalid player and forced layout evidence do not invent platform', async () => {
   await withRegistry(async (manager) => {
     for (const result of [fixture(255), { ...fixture(), header: { ...fixture().header, playerCarIndex: 22 } },
@@ -127,6 +142,15 @@ test('persistence failure reports an error without dropping accepted capture', a
     assert.equal(blocked.captureProfile.platform, 'PLAYSTATION')
     assert.equal(errors.length, 1)
     assert.equal(fs.readFileSync(file, 'utf8'), 'blocking parent file')
+  })
+})
+test('wizard registration does not acknowledge a source that could not be persisted', async () => {
+  await withRegistry(async (_manager, file) => {
+    fs.writeFileSync(file, 'blocking parent file')
+    const manager = new TelemetrySourceManager(path.join(file, 'sources.json'))
+    manager.registerConfiguredSource('XBOX')
+    await assert.rejects(manager.flushRequired())
+    assert.equal(manager.snapshot().sources[0].state, 'offline')
   })
 })
 test('production packet filtering keeps conflicts out of accepted health/capture while preserving raw forwarding', () => {

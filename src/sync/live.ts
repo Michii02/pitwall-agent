@@ -26,7 +26,13 @@ import { TEAM_NAMES } from '../udp/packets/common'
 // instead.
 export type AgentHealthPushPayload = HealthSnapshot & {
   network: AgentNetworkInfo
-  capturePlatform: AgentConfig['capturePlatform']
+  capturePlatform: AgentConfig['capturePlatform'] | null
+}
+
+export type AgentCommand = {
+  id: string
+  command: 'registerSource'
+  data: { platform: 'PC' | 'PLAYSTATION' | 'XBOX' }
 }
 
 // How often to ping the server once connected, and how long without a pong
@@ -63,6 +69,7 @@ export class LiveForwarder {
      *  wait for the next state transition to learn where things already
      *  stand (e.g. telemetry was already flowing). */
     private getHealthSnapshot?: () => AgentHealthPushPayload,
+    private onCommand?: (command: AgentCommand) => Promise<unknown>,
   ) {
     const wsBase = config.apiUrl.replace(/^http/, 'ws')
     this.url = `${wsBase}/agent${config.agentToken ? `?token=${encodeURIComponent(config.agentToken)}` : ''}`
@@ -95,6 +102,10 @@ export class LiveForwarder {
         this.lastPongAt = Date.now()
         log.debug('Live forwarder heartbeat: pong received')
       })
+      socket.on('message', (buffer) => {
+        if (!isCurrent()) return
+        void this.handleServerMessage(socket, buffer.toString())
+      })
       socket.on('close', () => {
         if (!isCurrent()) return
         this.stopHeartbeat()
@@ -120,6 +131,31 @@ export class LiveForwarder {
       log.warn(`Live forwarder: failed to construct WebSocket — retrying in 5s (${(err as Error).message})`)
       this.scheduleReconnect()
     }
+  }
+
+  private async handleServerMessage(socket: WebSocket, raw: string): Promise<void> {
+    let value: unknown
+    try { value = JSON.parse(raw) } catch { return }
+    if (!value || typeof value !== 'object') return
+    const message = value as { type?: unknown; id?: unknown; command?: unknown; data?: { platform?: unknown } }
+    if (message.type !== 'agentCommand' || typeof message.id !== 'string') return
+    const platform = message.data?.platform
+    if (message.command !== 'registerSource' || !['PC', 'PLAYSTATION', 'XBOX'].includes(String(platform)) || !this.onCommand) {
+      this.sendCommandResult(socket, message.id, false, undefined, 'Unsupported Companion command.')
+      return
+    }
+    try {
+      const data = await this.onCommand({ id: message.id, command: 'registerSource', data: { platform: platform as AgentCommand['data']['platform'] } })
+      this.sendCommandResult(socket, message.id, true, data)
+    } catch (error) {
+      log.warn(`Companion command failed: ${(error as Error).message}`)
+      this.sendCommandResult(socket, message.id, false, undefined, 'The racing device could not be saved.')
+    }
+  }
+
+  private sendCommandResult(socket: WebSocket, id: string, ok: boolean, data?: unknown, error?: string): void {
+    if (socket.readyState !== WebSocket.OPEN) return
+    try { socket.send(JSON.stringify({ type: 'agentCommandResult', id, ok, ...(ok ? { data } : { error }) })) } catch { /* socket closing */ }
   }
 
   private startHeartbeat(socket: WebSocket, isCurrent: () => boolean): void {

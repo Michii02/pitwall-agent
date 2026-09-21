@@ -144,13 +144,22 @@ async function main(): Promise<void> {
   const buildHealthPushPayload = () => ({
     ...telemetryHealth.snapshot(),
     network: detectAgentNetworkInfo(),
-    capturePlatform: config.capturePlatform,
+    capturePlatform: sources.captureProfile.platform === 'UNKNOWN'
+      ? (config.capturePlatformOverride ? config.capturePlatform : null)
+      : sources.captureProfile.platform,
     sources: sources.snapshot(),
     recording: lifecycle.snapshot,
     forwarding: relay.snapshot(),
     queueDepth: queue.pendingCount(),
   })
-  const live = new LiveForwarder(config, () => lifecycle.snapshot, buildHealthPushPayload)
+  const live = new LiveForwarder(config, () => lifecycle.snapshot, buildHealthPushPayload, async (command) => {
+    if (command.command !== 'registerSource') throw new Error('Unsupported command')
+    sources.registerConfiguredSource(command.data.platform)
+    await sources.flushRequired()
+    const snapshot = sources.snapshot()
+    live.pushHealth(buildHealthPushPayload())
+    return snapshot
+  })
   live.start()
   telemetryHealth.onStateChange(() => live.pushHealth(buildHealthPushPayload()))
 

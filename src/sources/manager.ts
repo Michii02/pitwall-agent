@@ -24,6 +24,7 @@ export class TelemetrySourceManager {
   private conflictCount = 0
   private lastSavedAt = 0
   private persistence: Promise<void> = Promise.resolve()
+  private lastPersistenceError: Error | null = null
   private current: CaptureProfile = { platform: 'UNKNOWN', captureMethod: null, platformOrigin: 'unknown', sourceDeviceId: null }
 
   constructor(private file: string, private onError: (error: Error) => void = () => {}) {
@@ -51,6 +52,26 @@ export class TelemetrySourceManager {
 
   get captureProfile(): CaptureProfile { return { ...this.current } }
   get senderAddress(): string | null { return this.activeAddress }
+
+  /**
+   * Remember a device the user completed setup for without pretending it is
+   * online or using that selection to override packet-derived platform data.
+   */
+  registerConfiguredSource(platform: Exclude<Platform, 'UNKNOWN'>): KnownSource {
+    let source = this.sources.find((record) => record.platform === platform)
+    if (!source) {
+      source = {
+        sourceId: randomUUID(),
+        name: platform === 'PLAYSTATION' ? 'PlayStation source' : platform === 'XBOX' ? 'Xbox source' : 'PC source',
+        platform,
+        configurationStatus: 'configured',
+        lastSeenAt: null,
+      }
+      this.sources.push(source)
+      this.persist()
+    }
+    return { ...source }
+  }
 
   observe(result: ParseResult, address: string, activeSession: boolean, override?: Platform, now = Date.now(), layoutOverride = false): { accepted: boolean; transition: boolean } {
     const uid = result.header.sessionUid
@@ -131,16 +152,28 @@ export class TelemetrySourceManager {
     source.lastSeenAt = now
     if (created || now - this.lastSavedAt > 30_000) {
       this.lastSavedAt = now
-      const serialized = JSON.stringify({ version: 1, sources: this.sources })
-      this.persistence = this.persistence.then(async () => {
-        await fs.promises.mkdir(path.dirname(this.file), { recursive: true })
-        const temporary = `${this.file}.tmp`
-        await fs.promises.writeFile(temporary, serialized, { mode: 0o600 })
-        await fs.promises.rename(temporary, this.file)
-      }).catch((error: Error) => this.onError(error))
+      this.persist()
     }
     return source
   }
 
+  private persist(): void {
+    const serialized = JSON.stringify({ version: 1, sources: this.sources })
+    this.lastPersistenceError = null
+    this.persistence = this.persistence.then(async () => {
+      await fs.promises.mkdir(path.dirname(this.file), { recursive: true })
+      const temporary = `${this.file}.tmp`
+      await fs.promises.writeFile(temporary, serialized, { mode: 0o600 })
+      await fs.promises.rename(temporary, this.file)
+    }).catch((error: Error) => {
+      this.lastPersistenceError = error
+      this.onError(error)
+    })
+  }
+
   async flush(): Promise<void> { await this.persistence }
+  async flushRequired(): Promise<void> {
+    await this.persistence
+    if (this.lastPersistenceError) throw this.lastPersistenceError
+  }
 }

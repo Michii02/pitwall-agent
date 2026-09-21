@@ -30,7 +30,7 @@ export interface AgentConfig {
   agentToken: string
   udpPort: number
   udpBindAddress: string
-  /** Where the driver races. Declared, never inferred — see DEFAULT_ENV. */
+  /** Advanced fallback used only when capturePlatformOverride is enabled. */
   capturePlatform: 'PC' | 'PLAYSTATION' | 'XBOX'
   /** Explicit override; default false enables verified platform recognition. */
   capturePlatformOverride?: boolean
@@ -71,12 +71,10 @@ PITWALL_AGENT_TOKEN=
 # on the right port for this setup rather than clashing with Moza on 20777.
 UDP_PORT=20779
 UDP_BIND_ADDRESS=0.0.0.0
-# Where you race. PC (default) | PLAYSTATION | XBOX.
-# Set this to PLAYSTATION or XBOX when this machine is receiving telemetry
-# over the local network from a console — the capture path is identical, this
-# only labels the session honestly (F1's UDP feed doesn't identify the
-# sending platform, so PitWall cannot infer it).
+# Advanced fallback only. Normal F1 25 platform detection comes from the
+# player participant packet and remembered sources are managed by PitWall.
 CAPTURE_PLATFORM=PC
+CAPTURE_PLATFORM_OVERRIDE=false
 GAME_VERSION=auto
 LOG_LEVEL=info
 LOG_MAX_SIZE_MB=10
