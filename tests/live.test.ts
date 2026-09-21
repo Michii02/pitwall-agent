@@ -45,11 +45,22 @@ test('live lap payload exposes bounded opponent facts without changing player fi
 })
 
 test('live status and damage payloads carry deterministic engineer fields', () => {
+  const telemetry = dataOf(toLegacyMessage({
+    header, gameVersion: 'f1_2025',
+    packet: { kind: 'carTelemetry', speed: 280, throttle: 1, steer: 0, brake: 0, clutch: 0, gear: 8, rpm: 11_500, drs: true, revLightsPercent: 80,
+      brakesTemperature: { fl: 500, fr: 501, rl: 450, rr: 451 }, tyreSurfaceTemp: { fl: 96, fr: 97, rl: 94, rr: 95 }, tyreInnerTemp: { fl: 90, fr: 91, rl: 88, rr: 89 }, tyrePressure: { fl: 23.1, fr: 23.2, rl: 21.1, rr: 21.2 } },
+  }, true, 122))
+  assert.deepEqual(telemetry.tyreSurfaceTemp, { fl: 96, fr: 97, rl: 94, rr: 95 })
+  assert.deepEqual(telemetry.tyreInnerTemp, { fl: 90, fr: 91, rl: 88, rr: 89 })
+  assert.deepEqual(telemetry.tyrePressure, { fl: 23.1, fr: 23.2, rl: 21.1, rr: 21.2 })
+
   const status = dataOf(toLegacyMessage({
     header, gameVersion: 'f1_2025',
     packet: { kind: 'status', fuelInTank: 18, fuelMix: 0, visualTyreCompound: 17, actualTyreCompound: 12, tyresAgeLaps: 6, ersStoreEnergy: 3_000_000, ersDeployMode: 2, ersDeployedThisLap: 0, ersHarvestedThisLap: 0, vehicleFiaFlags: 0, grid: [{ vehicleIndex: 7, fuelInTank: 17, actualTyreCompound: 16, visualTyreCompound: 16, tyresAgeLaps: 4, vehicleFiaFlags: 1 }] },
   }, true, 123))
   assert.equal(status.ersStoreEnergy, 3_000_000)
+  assert.equal(status.ersDeployedThisLap, 0)
+  assert.equal(status.ersHarvestedThisLap, 0)
   assert.deepEqual(status.grid, [{ vehicleIndex: 7, fuelInTank: 17, actualTyreCompound: 16, visualTyreCompound: 16, tyresAgeLaps: 4, vehicleFiaFlags: 1 }])
 
   const statusWithoutGrid = dataOf(toLegacyMessage({

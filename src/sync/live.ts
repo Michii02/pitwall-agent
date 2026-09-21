@@ -291,6 +291,9 @@ export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Da
           gear: pkt.gear,
           rpm: pkt.rpm,
           drs: pkt.drs,
+          tyreSurfaceTemp: pkt.tyreSurfaceTemp,
+          tyreInnerTemp: pkt.tyreInnerTemp,
+          tyrePressure: pkt.tyrePressure,
         },
       }
     case 'status':
@@ -304,6 +307,8 @@ export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Da
           tyresAgeLaps: pkt.tyresAgeLaps,
           ersStoreEnergy: pkt.ersStoreEnergy,
           ersDeployMode: pkt.ersDeployMode,
+          ersDeployedThisLap: pkt.ersDeployedThisLap,
+          ersHarvestedThisLap: pkt.ersHarvestedThisLap,
           ...(includeGrid && pkt.grid ? { grid: pkt.grid } : {}),
         },
       }
