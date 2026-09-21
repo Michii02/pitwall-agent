@@ -32,6 +32,12 @@ const gap = (value: unknown): boolean => object(value) && (value.reason === 'sil
   && ((value.end_received_at_ms === null && value.end_sample_time_ms === null)
     || (nonnegative(value.end_received_at_ms) && value.end_received_at_ms > value.start_received_at_ms
       && nonnegative(value.end_sample_time_ms) && value.end_sample_time_ms > value.start_sample_time_ms))
+const trackStateEvent = (value: unknown): boolean => object(value)
+  && ['green', 'local_yellow', 'red_flag', 'safety_car', 'virtual_safety_car', 'formation', 'unknown'].includes(value.state as string)
+  && (value.lap_number === null || integer(value.lap_number, 0, 1000)) && nonnegative(value.observed_at_ms)
+  && (value.safety_car_status === null || integer(value.safety_car_status, 0, 3))
+  && (value.player_fia_flag === null || integer(value.player_fia_flag, -1, 4))
+  && ['session_status', 'player_fia_flag', 'unavailable'].includes(value.source as string)
 
 /** Validate local recovery data before it becomes live telemetry. */
 export function isActiveSessionCheckpoint(value: unknown): value is ActiveSessionCheckpoint {
@@ -59,7 +65,8 @@ export function isActiveSessionCheckpoint(value: unknown): value is ActiveSessio
     !Array.isArray(record.stints) || !Array.isArray(record.damage_log) || !Array.isArray(record.incidents) ||
     typeof record.session_type !== 'string' || !['PC', 'PLAYSTATION', 'XBOX', 'UNKNOWN'].includes(record.platform as string)) return false
   if (record.session_type !== SESSION_TYPE_NAMES[Number(session.sessionType)] || !record.telemetry_samples.every(sample)
-    || !(record.telemetry_gaps === undefined || (Array.isArray(record.telemetry_gaps) && record.telemetry_gaps.length <= 1000 && record.telemetry_gaps.every(gap)))) return false
+    || !(record.telemetry_gaps === undefined || (Array.isArray(record.telemetry_gaps) && record.telemetry_gaps.length <= 1000 && record.telemetry_gaps.every(gap)))
+    || !(record.track_state_events === undefined || (Array.isArray(record.track_state_events) && record.track_state_events.length <= 1000 && record.track_state_events.every(trackStateEvent)))) return false
   if (!record.laps.every((lap: unknown) => object(lap) && Number.isSafeInteger(lap.lap_number) && Number(lap.lap_number) > 0 && nonnegative(lap.lap_time_ms))) return false
   const pending: Array<{ item: unknown; depth: number }> = [{ item: value, depth: 0 }]
   let visited = 0
