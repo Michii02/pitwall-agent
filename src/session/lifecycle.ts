@@ -5,18 +5,19 @@
  *
  * Start triggers: SSTA event, or lap packets arriving while a session packet
  * identifies an on-track session.
- * End triggers: SEND event, player result status finished/dnf, or 60 s of
- * UDP silence while active (abandoned session).
+ * End triggers: SEND event, player result status finished/dnf, or explicit
+ * completion of an interrupted capture. Silence preserves the capture.
  */
 
 import { SessionCollector, type SessionRecord, type CaptureProfile } from './collector'
 import type { ParseResult } from '../udp/parser'
 import { SESSION_TYPE_NAMES, type SessionPacket, type GameVersion } from '../udp/packets/common'
 import { log } from '../utils/logger'
+import type { ActiveSessionCheckpoint } from './checkpoint'
 
 export type AgentState = 'IDLE' | 'CONNECTED' | 'SESSION_STARTING' | 'SESSION_ACTIVE' | 'SESSION_ENDING' | 'SYNCING'
 
-const ABANDON_TIMEOUT_MS = 60_000
+const INTERRUPTION_TIMEOUT_MS = 4_000
 const CONNECTED_TIMEOUT_MS = 10_000
 // A finished session's Session/Lap/Final-Classification packets keep being
 // broadcast by the game while the player sits on the post-race results/
@@ -31,6 +32,8 @@ export interface LifecycleEvents {
   onStateChange: (state: AgentState, detail?: string) => void
   onSessionComplete: (record: SessionRecord) => Promise<void>
   onLapComplete: (trackName: string, lapNumber: number) => void
+  onCheckpoint?: () => void
+  onCaptureFinalized?: (record: SessionRecord) => void
 }
 
 export class SessionLifecycle {
@@ -40,9 +43,11 @@ export class SessionLifecycle {
   private gameVersion: GameVersion | null = null
   private lastPacketAt = 0
   private abandonTimer: NodeJS.Timeout | null = null
+  private checkpointTimer: NodeJS.Timeout | null = null
   private connectedTimer: NodeJS.Timeout | null = null
   // Same-session-broadcast suppression (see SAME_SESSION_SUPPRESS_MS above).
   private currentHeaderSessionUid: string | null = null
+  private currentWireFormat = 0
   private lastFinalizedSessionUid: string | null = null
   private lastFinalizedAt = 0
   private suppressedRestartLogged = false
@@ -53,6 +58,61 @@ export class SessionLifecycle {
   constructor(private events: LifecycleEvents, private captureProfile?: CaptureProfile) {}
 
   get currentState(): AgentState { return this.state }
+  createCheckpoint(sourceAddress: string, ownerFingerprint: string): ActiveSessionCheckpoint | null {
+    if (!this.collector || !this.lastSessionPacket || !this.gameVersion || !this.collector.record.session_uid) return null
+    return { version: 1, capturedAtMs: Date.now(), lastAcceptedAtMs: this.lastPacketAt, sourceAddress,
+      ownerFingerprint, wireFormat: this.currentWireFormat, gameVersion: this.gameVersion, sessionPacket: { ...this.lastSessionPacket }, collector: this.collector.recoveryState() }
+  }
+
+  restoreRecovery(checkpoint: ActiveSessionCheckpoint, fresh: ParseResult, sourceAddress: string): boolean {
+    if (fresh.packet.kind !== 'session') return false
+    this.collector = SessionCollector.restore(checkpoint.gameVersion, checkpoint.sessionPacket, checkpoint.collector)
+    this.gameVersion = checkpoint.gameVersion
+    this.lastSessionPacket = checkpoint.sessionPacket
+    this.lastPacketAt = checkpoint.lastAcceptedAtMs
+    const matches = checkpoint.sourceAddress === sourceAddress && fresh.header.sessionUid === checkpoint.collector.record.session_uid &&
+      fresh.gameVersion === checkpoint.gameVersion && fresh.header.packetFormat === checkpoint.wireFormat && fresh.packet.trackId === checkpoint.sessionPacket.trackId &&
+      SESSION_TYPE_NAMES[fresh.packet.sessionType] === checkpoint.collector.record.session_type
+    this.collector.openGap(checkpoint.lastAcceptedAtMs, 'agent_restart')
+    if (!matches) {
+      this.endSession(true)
+      this.lastSessionPacket = null
+      this.setState('CONNECTED')
+      return false
+    }
+    this.setState('SESSION_ACTIVE', 'resumed capture')
+    this.startCheckpointTimer()
+    return true
+  }
+
+  stop(): void {
+    this.events.onCheckpoint?.()
+    if (this.abandonTimer) clearTimeout(this.abandonTimer)
+    if (this.connectedTimer) clearTimeout(this.connectedTimer)
+    if (this.checkpointTimer) clearInterval(this.checkpointTimer)
+    this.abandonTimer = null; this.connectedTimer = null; this.checkpointTimer = null
+  }
+
+  get canFinishInterruptedCapture(): boolean { return !!this.collector && Date.now() - this.lastPacketAt >= INTERRUPTION_TIMEOUT_MS }
+  finishInterruptedCapture(): void { if (this.canFinishInterruptedCapture) this.endSession(true) }
+
+  private startCheckpointTimer(): void {
+    if (this.checkpointTimer) clearInterval(this.checkpointTimer)
+    this.checkpointTimer = setInterval(() => { if (this.collector) this.events.onCheckpoint?.() }, 5_000)
+    this.checkpointTimer.unref()
+  }
+  updateCaptureProfile(profile: CaptureProfile): void {
+    this.captureProfile = profile
+    this.collector?.updateCaptureProfile(profile)
+  }
+
+  /** Conservative source/UID transition: preserve old capture as incomplete. */
+  resetForSourceTransition(): void {
+    this.endSession(true)
+    this.lastSessionPacket = null
+    this.gameVersion = null
+    this.setState('CONNECTED')
+  }
   get sessionDetail(): string | null {
     if (!this.collector) return null
     return `${this.collector.record.track_name} · Lap ${this.collector.currentLap}`
@@ -84,9 +144,11 @@ export class SessionLifecycle {
   }
 
   feed(result: ParseResult): void {
+    this.collector?.closeGap(Date.now())
     this.lastPacketAt = Date.now()
     this.gameVersion = result.gameVersion
     this.currentHeaderSessionUid = result.header.sessionUid
+    this.currentWireFormat = result.header.packetFormat
     this.armTimers()
 
     // Any packet flow while idle means the game is running
@@ -168,6 +230,7 @@ export class SessionLifecycle {
         if (this.collector && this.state === 'SESSION_ACTIVE') {
           const completed = this.collector.updateLap(pkt)
           if (completed) {
+            this.events.onCheckpoint?.()
             this.events.onLapComplete(this.collector.record.track_name, this.collector.currentLap)
           }
           // Race Context Intelligence (additive): buffered all-car proximity
@@ -246,7 +309,10 @@ export class SessionLifecycle {
 
     this.setState('SESSION_STARTING', reason)
     this.collector = new SessionCollector(this.gameVersion, s, this.captureProfile)
+    if (this.currentHeaderSessionUid) this.collector.updateSessionUid(this.currentHeaderSessionUid)
     this.setState('SESSION_ACTIVE')
+    this.startCheckpointTimer()
+    this.events.onCheckpoint?.()
   }
 
   /**
@@ -269,7 +335,16 @@ export class SessionLifecycle {
   private endSession(abandoned: boolean): void {
     if (!this.collector) return
     this.setState('SESSION_ENDING')
+    const recovery = this.collector.recoveryState()
     const record = this.collector.finalise(abandoned)
+    try { this.events.onCaptureFinalized?.(record) }
+    catch (error) {
+      this.collector = SessionCollector.restore(this.gameVersion!, this.lastSessionPacket!, recovery)
+      this.setState('SESSION_ACTIVE', 'local storage unavailable')
+      throw error
+    }
+    if (this.checkpointTimer) clearInterval(this.checkpointTimer)
+    this.checkpointTimer = null
     this.lastFinalizedSessionUid = record.session_uid ?? this.currentHeaderSessionUid
     this.lastFinalizedAt = Date.now()
     this.suppressedRestartLogged = false
@@ -298,13 +373,16 @@ export class SessionLifecycle {
 
     this.abandonTimer = setTimeout(() => {
       if (this.collector) {
-        log.warn('UDP silence for 60 s during active session — finalising as abandoned')
-        this.endSession(true)
+        this.collector.openGap(this.lastPacketAt, 'silence')
+        this.events.onCheckpoint?.()
+        log.debug('Telemetry interrupted; retaining active capture for reconciliation')
       }
-    }, ABANDON_TIMEOUT_MS)
+    }, INTERRUPTION_TIMEOUT_MS)
+    this.abandonTimer.unref()
 
     this.connectedTimer = setTimeout(() => {
       if (!this.collector && this.state === 'CONNECTED') this.setState('IDLE', 'game closed')
     }, CONNECTED_TIMEOUT_MS)
+    this.connectedTimer.unref()
   }
 }

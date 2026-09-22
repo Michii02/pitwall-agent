@@ -17,6 +17,7 @@ import type { AgentConfig } from '../config'
 import type { HealthSnapshot } from '../health/state'
 import type { AgentNetworkInfo } from '../network/interfaces'
 import { log } from '../utils/logger'
+import { TEAM_NAMES } from '../udp/packets/common'
 
 // MVP1 Phase 1f — network interfaces and the currently-configured capture
 // platform are a different axis from health/state.ts's UDP-signal-driven
@@ -25,8 +26,12 @@ import { log } from '../utils/logger'
 // instead.
 export type AgentHealthPushPayload = HealthSnapshot & {
   network: AgentNetworkInfo
-  capturePlatform: AgentConfig['capturePlatform']
+  capturePlatform: AgentConfig['capturePlatform'] | null
 }
+
+export type AgentCommand =
+  | { id: string; command: 'registerSource'; data: { platform: 'PC' | 'PLAYSTATION' | 'XBOX' } }
+  | { id: string; command: 'setSourceInput'; data: { sourceId: string; input: 'CONTROLLER' | 'WHEEL' | 'OTHER' | 'UNKNOWN' } }
 
 // How often to ping the server once connected, and how long without a pong
 // before the connection is declared dead. 'close'/'error' alone are not
@@ -62,6 +67,7 @@ export class LiveForwarder {
      *  wait for the next state transition to learn where things already
      *  stand (e.g. telemetry was already flowing). */
     private getHealthSnapshot?: () => AgentHealthPushPayload,
+    private onCommand?: (command: AgentCommand) => Promise<unknown>,
   ) {
     const wsBase = config.apiUrl.replace(/^http/, 'ws')
     this.url = `${wsBase}/agent${config.agentToken ? `?token=${encodeURIComponent(config.agentToken)}` : ''}`
@@ -94,6 +100,10 @@ export class LiveForwarder {
         this.lastPongAt = Date.now()
         log.debug('Live forwarder heartbeat: pong received')
       })
+      socket.on('message', (buffer) => {
+        if (!isCurrent()) return
+        void this.handleServerMessage(socket, buffer.toString())
+      })
       socket.on('close', () => {
         if (!isCurrent()) return
         this.stopHeartbeat()
@@ -119,6 +129,45 @@ export class LiveForwarder {
       log.warn(`Live forwarder: failed to construct WebSocket — retrying in 5s (${(err as Error).message})`)
       this.scheduleReconnect()
     }
+  }
+
+  private async handleServerMessage(socket: WebSocket, raw: string): Promise<void> {
+    let value: unknown
+    try { value = JSON.parse(raw) } catch { return }
+    if (!value || typeof value !== 'object') return
+    const message = value as { type?: unknown; id?: unknown; command?: unknown; data?: { platform?: unknown; sourceId?: unknown; input?: unknown } }
+    if (message.type !== 'agentCommand' || typeof message.id !== 'string') return
+    if (!this.onCommand) {
+      this.sendCommandResult(socket, message.id, false, undefined, 'Unsupported Companion command.')
+      return
+    }
+    let command: AgentCommand
+    if (message.command === 'registerSource' && ['PC', 'PLAYSTATION', 'XBOX'].includes(String(message.data?.platform))) {
+      command = { id: message.id, command: 'registerSource', data: { platform: message.data?.platform as 'PC' | 'PLAYSTATION' | 'XBOX' } }
+    } else if (message.command === 'setSourceInput' && typeof message.data?.sourceId === 'string'
+      && ['CONTROLLER', 'WHEEL', 'OTHER', 'UNKNOWN'].includes(String(message.data.input))) {
+      command = { id: message.id, command: 'setSourceInput', data: { sourceId: message.data.sourceId, input: message.data.input as 'CONTROLLER' | 'WHEEL' | 'OTHER' | 'UNKNOWN' } }
+    } else {
+      this.sendCommandResult(socket, message.id, false, undefined, 'Unsupported Companion command.')
+      return
+    }
+    try {
+      const data = await this.onCommand(command)
+      this.sendCommandResult(socket, message.id, true, data)
+    } catch (error) {
+      log.warn(`Companion command failed: ${(error as Error).message}`)
+      const detail = (error as Error).message.includes('active session')
+        ? 'Finish the active session before changing racing input.'
+        : (error as Error).message.includes('not found')
+          ? 'Racing device was not found.'
+          : 'The racing device could not be saved.'
+      this.sendCommandResult(socket, message.id, false, undefined, detail)
+    }
+  }
+
+  private sendCommandResult(socket: WebSocket, id: string, ok: boolean, data?: unknown, error?: string): void {
+    if (socket.readyState !== WebSocket.OPEN) return
+    try { socket.send(JSON.stringify({ type: 'agentCommandResult', id, ok, ...(ok ? { data } : { error }) })) } catch { /* socket closing */ }
   }
 
   private startHeartbeat(socket: WebSocket, isCurrent: () => boolean): void {
@@ -269,8 +318,14 @@ export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Da
         type: 'participants', timestamp: ts,
         data: {
           playerVehicleIndex: result.header.playerCarIndex,
-          participants: (pkt.grid ?? [{ vehicleIndex: result.header.playerCarIndex, driverName: pkt.driverName }])
-            .map((entry) => ({ vehicleIndex: entry.vehicleIndex, driverName: entry.driverName })),
+          participants: (pkt.grid ?? [{ vehicleIndex: result.header.playerCarIndex, driverName: pkt.driverName, teamId: pkt.teamId, raceNumber: pkt.raceNumber }])
+            .map((entry) => ({
+              vehicleIndex: entry.vehicleIndex,
+              driverName: entry.driverName,
+              teamId: entry.teamId,
+              teamName: TEAM_NAMES[entry.teamId] ?? null,
+              raceNumber: entry.raceNumber,
+            })),
         },
       }
     case 'carTelemetry':
@@ -284,6 +339,9 @@ export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Da
           gear: pkt.gear,
           rpm: pkt.rpm,
           drs: pkt.drs,
+          tyreSurfaceTemp: pkt.tyreSurfaceTemp,
+          tyreInnerTemp: pkt.tyreInnerTemp,
+          tyrePressure: pkt.tyrePressure,
         },
       }
     case 'status':
@@ -297,6 +355,9 @@ export function toLegacyMessage(result: ParseResult, includeGrid = true, ts = Da
           tyresAgeLaps: pkt.tyresAgeLaps,
           ersStoreEnergy: pkt.ersStoreEnergy,
           ersDeployMode: pkt.ersDeployMode,
+          ersDeployedThisLap: pkt.ersDeployedThisLap,
+          ersHarvestedThisLap: pkt.ersHarvestedThisLap,
+          vehicleFiaFlags: pkt.vehicleFiaFlags,
           ...(includeGrid && pkt.grid ? { grid: pkt.grid } : {}),
         },
       }

@@ -21,13 +21,17 @@ import { SyncSender } from './sync/sender'
 import { LiveForwarder } from './sync/live'
 import { TrayManager, openLogsInNotepad, openSettingsFile } from './tray/icon'
 import type { GameVersion } from './udp/packets/common'
+import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { TelemetrySourceManager } from './sources/manager'
 
-const AGENT_VERSION = '1.0.1'
+const AGENT_VERSION = '1.0.2'
 const ERROR_STATE_AFTER_MS = 30 * 60_000
 const QUEUE_WARNING_THRESHOLD = 50
 
 async function main(): Promise<void> {
   const config = loadConfig()
+  const sources = new TelemetrySourceManager(path.join(APP_DIR, 'known-sources.json'), (error) => log.warn(`Source configuration could not be saved: ${error.message}`))
   configureLogger({ level: config.logLevel, maxSizeMb: config.logMaxSizeMb, maxFiles: config.logMaxFiles })
 
   log.info(`PitWall Agent v${AGENT_VERSION} starting · API ${config.apiUrl} · UDP ${config.udpBindAddress}:${config.udpPort}`)
@@ -47,6 +51,13 @@ async function main(): Promise<void> {
   }
 
   const queue = new SessionQueue()
+  const ownerFingerprint = createHash('sha256').update(config.agentToken).digest('hex')
+  let recovery = queue.loadActiveCheckpoint()
+  if (recovery && recovery.ownerFingerprint !== ownerFingerprint) {
+    queue.quarantineActiveCheckpoint(recovery.collector.record.id, 'Pairing owner changed')
+    log.warn('Previous active capture belongs to a different pairing; retained locally')
+    recovery = null
+  }
 
   let firstSyncNotified = false
   const tray = new TrayManager({
@@ -59,6 +70,8 @@ async function main(): Promise<void> {
     },
     getPendingCount: () => queue.pendingCount(),
     getSessionDetail: () => lifecycle.sessionDetail,
+    canFinishInterruptedCapture: () => lifecycle.canFinishInterruptedCapture,
+    onFinishInterruptedCapture: () => lifecycle.finishInterruptedCapture(),
   }, AGENT_VERSION)
 
   const sender = new SyncSender(queue, config, {
@@ -94,6 +107,17 @@ async function main(): Promise<void> {
       live.pushSnapshot()
     },
     onSessionComplete: (record) => sender.submit(record),
+    onCaptureFinalized: (record) => queue.completeActiveSession(record),
+    onCheckpoint: () => {
+      tray.setState(lifecycle.currentState) // refresh the interrupted-session action
+      const address = sources.senderAddress
+      if (!address) return
+      const checkpoint = lifecycle.createCheckpoint(address, ownerFingerprint)
+      if (checkpoint) {
+        try { queue.saveActiveCheckpoint(checkpoint) }
+        catch (error) { log.warn(`Active capture could not be checkpointed: ${(error as Error).message}`) }
+      }
+    },
     onLapComplete: () => {
       tray.setState('SESSION_ACTIVE') // refreshes "Lap N" in menu
       live.pushSnapshot()
@@ -101,8 +125,7 @@ async function main(): Promise<void> {
   }, {
     // Capture provenance (League Session Intelligence MVP 1.1). The capture
     // path is identical for PC and console — this only labels the session.
-    platform: config.capturePlatform,
-    captureMethod: config.capturePlatform === 'PC' ? 'PC_NATIVE' : 'CONSOLE_DESKTOP',
+    ...sources.captureProfile,
   })
 
   const versionOverride: GameVersion | undefined =
@@ -121,12 +144,26 @@ async function main(): Promise<void> {
   const buildHealthPushPayload = () => ({
     ...telemetryHealth.snapshot(),
     network: detectAgentNetworkInfo(),
-    capturePlatform: config.capturePlatform,
+    capturePlatform: sources.captureProfile.platform === 'UNKNOWN'
+      ? (config.capturePlatformOverride ? config.capturePlatform : null)
+      : sources.captureProfile.platform,
+    sources: sources.snapshot(),
     recording: lifecycle.snapshot,
     forwarding: relay.snapshot(),
     queueDepth: queue.pendingCount(),
   })
-  const live = new LiveForwarder(config, () => lifecycle.snapshot, buildHealthPushPayload)
+  const live = new LiveForwarder(config, () => lifecycle.snapshot, buildHealthPushPayload, async (command) => {
+    if (command.command === 'registerSource') sources.registerConfiguredSource(command.data.platform)
+    else if (command.command === 'setSourceInput') {
+      if (lifecycle.snapshot.active) throw new Error('Finish the active session before changing racing input')
+      sources.setPreferredInput(command.data.sourceId, command.data.input)
+      lifecycle.updateCaptureProfile(sources.captureProfile)
+    } else throw new Error('Unsupported command')
+    await sources.flushRequired()
+    const snapshot = sources.snapshot()
+    live.pushHealth(buildHealthPushPayload())
+    return snapshot
+  })
   live.start()
   telemetryHealth.onStateChange(() => live.pushHealth(buildHealthPushPayload()))
 
@@ -146,6 +183,20 @@ async function main(): Promise<void> {
         health: telemetryHealth,
         versionOverride,
         relay: (packet) => relay.forward(packet),
+        acceptIgnored: (header) => sources.acceptsAuxiliaryPacket(header.sessionUid, source.address, lifecycle.snapshot.active),
+        acceptParsed: (result) => {
+          if (recovery && result.packet.kind !== 'session') return false
+          const decision = sources.observe(result, source.address, lifecycle.snapshot.active,
+            config.capturePlatformOverride ? config.capturePlatform : undefined, Date.now(), versionOverride !== undefined)
+          if (!decision.accepted) return false
+          if (recovery) {
+            lifecycle.restoreRecovery(recovery, result, source.address)
+            recovery = null
+          }
+          if (decision.transition) lifecycle.resetForSourceTransition()
+          lifecycle.updateCaptureProfile(sources.captureProfile)
+          return true
+        },
         onParsed: (result) => {
           lifecycle.feed(result)
           live.forward(result)
@@ -190,10 +241,11 @@ async function main(): Promise<void> {
     try { overlayBridge.close() } catch { /* ok */ }
     try { socket.close() } catch { /* ok */ }
     try { sender.stop() } catch { /* ok */ }
+    try { lifecycle.stop() } catch { /* ok */ }
     try { queue.close() } catch { /* ok */ }
     telemetryHealth.stop()
     releaseInstanceLock()
-    process.exit(code)
+    void sources.flush().finally(() => process.exit(code))
   }
 
   process.on('SIGINT', () => shutdown(0))

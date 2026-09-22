@@ -51,6 +51,7 @@ export interface StintRecord {
 }
 
 export interface TelemetrySample {
+  gap_before?: boolean
   t: number          // ms since session start
   lap: number | null
   d: number | null   // lap distance (m)
@@ -157,7 +158,11 @@ export interface GridPositionSnapshot {
  */
 export interface CaptureProfile {
   platform: 'PC' | 'PLAYSTATION' | 'XBOX' | 'UNKNOWN'
-  captureMethod: 'PC_NATIVE' | 'CONSOLE_DESKTOP'
+  captureMethod: 'PC_NATIVE' | 'CONSOLE_DESKTOP' | null
+  platformOrigin?: 'detected' | 'user_selected' | 'inferred' | 'unknown'
+  sourceDeviceId?: string | null
+  inputDevice?: 'CONTROLLER' | 'WHEEL' | 'OTHER' | 'UNKNOWN'
+  inputOrigin?: 'user_selected' | 'unknown'
 }
 
 export interface ProximitySnapshot {
@@ -172,6 +177,8 @@ export interface ProximitySnapshot {
 }
 
 export interface SessionRecord {
+  telemetry_gaps?: RecordedTelemetryGap[]
+  track_state_events?: TrackStateEventRecord[]
   id: string
   source: 'udp_agent'
   game_version: GameVersion
@@ -193,7 +200,11 @@ export interface SessionRecord {
    *  reported honestly as a setting rather than inferred. Defaults keep every
    *  existing PC install behaving exactly as before. */
   platform: 'PC' | 'PLAYSTATION' | 'XBOX' | 'UNKNOWN'
-  capture_method: 'PC_NATIVE' | 'CONSOLE_DESKTOP'
+  capture_method: 'PC_NATIVE' | 'CONSOLE_DESKTOP' | null
+  platform_origin?: CaptureProfile['platformOrigin']
+  source_device_id?: string | null
+  input_device?: CaptureProfile['inputDevice']
+  input_origin?: CaptureProfile['inputOrigin']
   track_id: number
   track_name: string
   session_type: string
@@ -243,6 +254,31 @@ export interface SessionRecord {
 
 type Wear = { fl: number; fr: number; rl: number; rr: number }
 
+export interface RecordedTelemetryGap {
+  start_received_at_ms: number
+  end_received_at_ms: number | null
+  reason: 'silence' | 'agent_restart'
+  start_sample_time_ms: number
+  end_sample_time_ms: number | null
+}
+
+export interface TrackStateEventRecord {
+  state: 'green' | 'local_yellow' | 'red_flag' | 'safety_car' | 'virtual_safety_car' | 'formation' | 'unknown'
+  lap_number: number | null
+  observed_at_ms: number
+  safety_car_status: number | null
+  player_fia_flag: number | null
+  source: 'session_status' | 'player_fia_flag' | 'unavailable'
+}
+export interface CollectorRecoveryState {
+  record: SessionRecord
+  sessionStartMs: number
+  lastLapNumber: number
+  lastLapMs: number
+  lastPitStatus: number
+  stintStartLap: number
+}
+
 const DAMAGE_LOG_INTERVAL = 5 // laps
 // Downsample throttle/brake capture: at most one sample per this interval, and
 // hard-cap the total so a long race can't produce an unbounded payload.
@@ -254,6 +290,19 @@ const MAX_SAMPLES = 6000              // ~20 min at 5 Hz; older ones are thinned
 // state classification, while keeping a long race's payload bounded.
 const PROXIMITY_SAMPLE_INTERVAL_MS = 2000
 const MAX_PROXIMITY_SNAPSHOTS = 2700  // ~90 min at 2s; same halving-thin fallback as MAX_SAMPLES
+const MAX_TRACK_STATE_EVENTS = 1000
+
+function resolveTrackState(safetyCarStatus: number | null, playerFiaFlag: number | null): Pick<TrackStateEventRecord, 'state' | 'source'> {
+  if (safetyCarStatus === 1) return { state: 'safety_car', source: 'session_status' }
+  if (safetyCarStatus === 2) return { state: 'virtual_safety_car', source: 'session_status' }
+  if (safetyCarStatus === 3) return { state: 'formation', source: 'session_status' }
+  if (playerFiaFlag === 4) return { state: 'red_flag', source: 'player_fia_flag' }
+  if (playerFiaFlag === 3) return { state: 'local_yellow', source: 'player_fia_flag' }
+  if (safetyCarStatus === 0 || playerFiaFlag === 0 || playerFiaFlag === 1) {
+    return { state: 'green', source: safetyCarStatus === 0 ? 'session_status' : 'player_fia_flag' }
+  }
+  return { state: 'unknown', source: 'unavailable' }
+}
 
 export class SessionCollector {
   readonly record: SessionRecord
@@ -281,9 +330,13 @@ export class SessionCollector {
   private currentLapDistance: number | null = null
   private sessionStartMs = Date.now()
   private lastSampleMs = 0
+  private gapBeforeNextSample = false
   private lastProximitySampleMs = 0
   private safetyCarActive = false
   private safetyCarThisLap = false
+  private currentSafetyCarStatus: number | null = null
+  private currentPlayerFiaFlag: number | null = null
+  private currentTrackState: TrackStateEventRecord['state'] | null = null
   private stintStartLap = 1
   private stintStartWear: Wear | null = null
   private lastDamageLogLap = 0
@@ -302,7 +355,11 @@ export class SessionCollector {
       // sets a profile keeps reporting PC / PC_NATIVE, which is what every
       // session before this change effectively was.
       platform: captureProfile?.platform ?? 'PC',
-      capture_method: captureProfile?.captureMethod ?? 'PC_NATIVE',
+      capture_method: captureProfile ? captureProfile.captureMethod : 'PC_NATIVE',
+      platform_origin: captureProfile?.platformOrigin,
+      source_device_id: captureProfile?.sourceDeviceId ?? null,
+      input_device: captureProfile?.inputDevice ?? 'UNKNOWN',
+      input_origin: captureProfile?.inputOrigin ?? 'unknown',
       track_id: session.trackId,
       track_name: TRACK_NAMES[session.trackId] ?? `Track ${session.trackId}`,
       session_type: SESSION_TYPE_NAMES[session.sessionType] ?? 'unknown',
@@ -332,6 +389,8 @@ export class SessionCollector {
       telemetry_samples: [],
     }
     this.sessionStartMs = Date.now()
+    this.currentSafetyCarStatus = session.safetyCarStatus
+    this.recordTrackState()
     log.info(`Session started · ${this.record.track_name} · ${this.record.session_type} · ${session.totalLaps} laps`)
   }
 
@@ -352,7 +411,11 @@ export class SessionCollector {
     // a later null (which would happen for every non-F1-25 packet since
     // parseSession only ever resolves it for that one verified version).
     if (this.record.ai_difficulty == null && s.aiDifficulty != null) this.record.ai_difficulty = s.aiDifficulty
-    const scNow = s.safetyCarStatus > 0
+    this.currentSafetyCarStatus = s.safetyCarStatus
+    this.recordTrackState()
+    // Formation lap (3) is a distinct session state, not a Safety Car/VSC
+    // period. Only explicit full-SC/VSC values neutralise a recorded lap.
+    const scNow = s.safetyCarStatus === 1 || s.safetyCarStatus === 2
     if (scNow && !this.safetyCarActive) log.info(`Safety car status → ${s.safetyCarStatus}`)
     this.safetyCarActive = scNow
     if (scNow) this.safetyCarThisLap = true
@@ -394,6 +457,62 @@ export class SessionCollector {
    *  read" convention already used elsewhere in this class. */
   updateSessionUid(uid: string): void {
     if (!this.record.session_uid && uid) this.record.session_uid = uid
+  }
+
+  updateCaptureProfile(profile: CaptureProfile): void {
+    if (profile.platform === 'UNKNOWN' && this.record.platform !== 'UNKNOWN') return
+    this.record.platform = profile.platform
+    this.record.capture_method = profile.captureMethod
+    this.record.platform_origin = profile.platformOrigin
+    this.record.source_device_id = profile.sourceDeviceId ?? null
+    this.record.input_device = profile.inputDevice ?? 'UNKNOWN'
+    this.record.input_origin = profile.inputOrigin ?? 'unknown'
+  }
+
+  recoveryState(): CollectorRecoveryState {
+    return { record: structuredClone(this.record), sessionStartMs: this.sessionStartMs,
+      lastLapNumber: this.lastLapNumber, lastLapMs: this.lastLapMs,
+      lastPitStatus: this.lastPitStatus, stintStartLap: this.stintStartLap }
+  }
+
+  static restore(game: GameVersion, session: SessionPacket, state: CollectorRecoveryState): SessionCollector {
+    const collector = new SessionCollector(game, session)
+    Object.assign(collector.record, structuredClone(state.record))
+    collector.sessionStartMs = state.sessionStartMs
+    collector.lastLapNumber = state.lastLapNumber
+    collector.lastLapMs = state.lastLapMs
+    collector.lastPitStatus = state.lastPitStatus
+    collector.stintStartLap = state.stintStartLap
+    collector.currentSafetyCarStatus = session.safetyCarStatus
+    const lastTrackState = collector.record.track_state_events?.at(-1)
+    collector.currentPlayerFiaFlag = lastTrackState?.player_fia_flag ?? null
+    collector.currentTrackState = lastTrackState?.state ?? resolveTrackState(collector.currentSafetyCarStatus, collector.currentPlayerFiaFlag).state
+    collector.safetyCarActive = session.safetyCarStatus === 1 || session.safetyCarStatus === 2
+    collector.gapBeforeNextSample = true
+    return collector
+  }
+
+  openGap(lastAcceptedAt: number, reason: RecordedTelemetryGap['reason']): void {
+    const gaps = this.record.telemetry_gaps ??= []
+    if (gaps.at(-1)?.end_received_at_ms === null) return
+    if (gaps.length < 1000) gaps.push({ start_received_at_ms: lastAcceptedAt, end_received_at_ms: null, reason,
+      start_sample_time_ms: Math.max(0, lastAcceptedAt - this.sessionStartMs), end_sample_time_ms: null })
+    this.gapBeforeNextSample = true
+    this.sector1Ms = null; this.sector2Ms = null
+    this.lastLapEndPosition = null
+    this.currentWear = null; this.currentDamage = null; this.prevWingDamage = null
+    this.currentFuel = null; this.currentTyreAge = null
+    this.currentErsStore = null; this.currentErsMode = null
+    this.currentTyreTemp = null; this.currentTyreInnerTemp = null; this.currentTyrePressure = null
+    this.currentCarPosition = null; this.currentLapDistance = null
+    this.latestLapGrid = null
+  }
+
+  closeGap(now: number): void {
+    const gap = this.record.telemetry_gaps?.at(-1)
+    if (!gap || gap.end_received_at_ms !== null || now <= gap.start_received_at_ms) return
+    gap.end_received_at_ms = now
+    gap.end_sample_time_ms = Math.max(0, now - this.sessionStartMs)
   }
 
   /** Full replace, last-write-wins per vehicle slot (matches updateParticipant's
@@ -516,6 +635,8 @@ export class SessionCollector {
   }
 
   updateStatus(s: StatusPacket): void {
+    this.currentPlayerFiaFlag = s.vehicleFiaFlags
+    this.recordTrackState()
     if (this.record.fuel_load_start === null && s.fuelInTank > 0) {
       this.record.fuel_load_start = round1(s.fuelInTank)
     }
@@ -531,6 +652,21 @@ export class SessionCollector {
     // ERS: normalise store energy against the 4 MJ battery cap.
     if (s.ersStoreEnergy != null) this.currentErsStore = Math.min(1, Math.max(0, s.ersStoreEnergy / 4_000_000))
     if (s.ersDeployMode != null) this.currentErsMode = s.ersDeployMode
+  }
+
+  private recordTrackState(): void {
+    const resolved = resolveTrackState(this.currentSafetyCarStatus, this.currentPlayerFiaFlag)
+    if (resolved.state === this.currentTrackState) return
+    this.currentTrackState = resolved.state
+    const events = this.record.track_state_events ??= []
+    if (events.length >= MAX_TRACK_STATE_EVENTS) return
+    events.push({
+      ...resolved,
+      lap_number: this.currentLap || null,
+      observed_at_ms: Math.max(0, Date.now() - this.sessionStartMs),
+      safety_car_status: this.currentSafetyCarStatus,
+      player_fia_flag: this.currentPlayerFiaFlag,
+    })
   }
 
   updateDamage(d: DamagePacket): void {
@@ -605,6 +741,7 @@ export class SessionCollector {
     this.lastSampleMs = now
     const samples = this.record.telemetry_samples
     const sample: TelemetrySample = {
+      ...(this.gapBeforeNextSample ? { gap_before: true } : {}),
       t: now - this.sessionStartMs,
       lap: this.lastLapNumber || null,
       d: this.currentLapDistance,
@@ -621,10 +758,19 @@ export class SessionCollector {
     if (this.currentTyreTemp) sample.tS = this.currentTyreTemp
     if (this.currentTyrePressure) sample.prs = this.currentTyrePressure
     samples.push(sample)
+    this.gapBeforeNextSample = false
     // Hard cap: if we hit the ceiling, thin by dropping every other sample so
     // the trace still spans the whole session rather than truncating it.
     if (samples.length > MAX_SAMPLES) {
-      this.record.telemetry_samples = samples.filter((_, i) => i % 2 === 0)
+      let pendingGap = false
+      this.record.telemetry_samples = samples.filter((sample, i) => {
+        pendingGap ||= sample.gap_before === true
+        if (i % 2 !== 0) return false
+        if (pendingGap) sample.gap_before = true
+        pendingGap = false
+        return true
+      })
+      this.gapBeforeNextSample = pendingGap
     }
   }
 
@@ -673,7 +819,7 @@ export class SessionCollector {
       const s3 = s1 && s2 ? Math.max(0, lap.lastLapMs - s1 - s2) : 0
 
       const rec: LapRecord = {
-        lap_number: this.lastLapNumber || lap.lapNumber - 1 || 1,
+        lap_number: lap.lapNumber - 1 || 1,
         lap_time_ms: lap.lastLapMs,
         sector_1_ms: s1,
         sector_2_ms: s2,

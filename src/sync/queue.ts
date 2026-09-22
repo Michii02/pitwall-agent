@@ -8,6 +8,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { DB_PATH } from '../config'
 import type { SessionRecord } from '../session/collector'
+import { isActiveSessionCheckpoint, type ActiveSessionCheckpoint } from '../session/checkpoint'
+import { log } from '../utils/logger'
 import { NATIVE_BINDING_BASE64 } from './nativeBinding.generated'
 
 export type SessionStatus = 'in_progress' | 'complete' | 'queued' | 'synced' | 'failed'
@@ -83,6 +85,13 @@ export class SessionQueue {
         status        TEXT NOT NULL,
         error_message TEXT
       );
+      CREATE TABLE IF NOT EXISTS active_checkpoints (
+        id TEXT PRIMARY KEY,
+        checkpoint_json TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'active',
+        error TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `)
   }
 
@@ -104,6 +113,42 @@ export class SessionQueue {
     this.db.prepare(`
       UPDATE sessions_buffer SET status = ?, updated_at = datetime('now'), synced_at = ${syncedAt} WHERE id = ?
     `).run(status, id)
+  }
+
+  saveActiveCheckpoint(checkpoint: ActiveSessionCheckpoint): void {
+    const completed = this.db.prepare('SELECT status FROM sessions_buffer WHERE id = ?').get(checkpoint.collector.record.id) as { status: string } | undefined
+    if (completed && completed.status !== 'in_progress') return
+    this.db.prepare(`INSERT INTO active_checkpoints(id,checkpoint_json,updated_at) VALUES(?,?,datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json,updated_at=excluded.updated_at WHERE active_checkpoints.state='active'`)
+      .run(checkpoint.collector.record.id, JSON.stringify(checkpoint))
+  }
+
+  loadActiveCheckpoint(): ActiveSessionCheckpoint | null {
+    const row = this.db.prepare("SELECT id,checkpoint_json FROM active_checkpoints WHERE state='active' ORDER BY updated_at DESC LIMIT 1")
+      .get() as { id: string; checkpoint_json: string } | undefined
+    if (!row) return null
+    try {
+      if (Buffer.byteLength(row.checkpoint_json) > 32 * 1024 * 1024) throw new Error('Recovery checkpoint exceeds size limit')
+      const checkpoint: unknown = JSON.parse(row.checkpoint_json)
+      if (!isActiveSessionCheckpoint(checkpoint) || checkpoint.collector.record.id !== row.id) throw new Error('Invalid recovery checkpoint')
+      return checkpoint
+    } catch (error) {
+      this.quarantineActiveCheckpoint(row.id, (error as Error).message)
+      log.warn('Previous recovery data could not be read; retained locally for review')
+      return null
+    }
+  }
+
+  quarantineActiveCheckpoint(id: string, reason: string): void {
+    this.db.prepare("UPDATE active_checkpoints SET state='quarantined',error=? WHERE id=?").run(reason, id)
+  }
+
+  /** Sync SQLite transaction prevents a crash leaving a completed and active copy. */
+  completeActiveSession(record: SessionRecord): void {
+    this.db.transaction(() => {
+      this.upsert(record, record.laps.length ? 'complete' : 'failed')
+      this.db.prepare('DELETE FROM active_checkpoints WHERE id=?').run(record.id)
+    })()
   }
 
   /** All sessions awaiting sync, oldest first. */
