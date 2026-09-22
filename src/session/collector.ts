@@ -161,6 +161,8 @@ export interface CaptureProfile {
   captureMethod: 'PC_NATIVE' | 'CONSOLE_DESKTOP' | null
   platformOrigin?: 'detected' | 'user_selected' | 'inferred' | 'unknown'
   sourceDeviceId?: string | null
+  inputDevice?: 'CONTROLLER' | 'WHEEL' | 'OTHER' | 'UNKNOWN'
+  inputOrigin?: 'user_selected' | 'unknown'
 }
 
 export interface ProximitySnapshot {
@@ -201,6 +203,8 @@ export interface SessionRecord {
   capture_method: 'PC_NATIVE' | 'CONSOLE_DESKTOP' | null
   platform_origin?: CaptureProfile['platformOrigin']
   source_device_id?: string | null
+  input_device?: CaptureProfile['inputDevice']
+  input_origin?: CaptureProfile['inputOrigin']
   track_id: number
   track_name: string
   session_type: string
@@ -354,6 +358,8 @@ export class SessionCollector {
       capture_method: captureProfile ? captureProfile.captureMethod : 'PC_NATIVE',
       platform_origin: captureProfile?.platformOrigin,
       source_device_id: captureProfile?.sourceDeviceId ?? null,
+      input_device: captureProfile?.inputDevice ?? 'UNKNOWN',
+      input_origin: captureProfile?.inputOrigin ?? 'unknown',
       track_id: session.trackId,
       track_name: TRACK_NAMES[session.trackId] ?? `Track ${session.trackId}`,
       session_type: SESSION_TYPE_NAMES[session.sessionType] ?? 'unknown',
@@ -459,6 +465,8 @@ export class SessionCollector {
     this.record.capture_method = profile.captureMethod
     this.record.platform_origin = profile.platformOrigin
     this.record.source_device_id = profile.sourceDeviceId ?? null
+    this.record.input_device = profile.inputDevice ?? 'UNKNOWN'
+    this.record.input_origin = profile.inputOrigin ?? 'unknown'
   }
 
   recoveryState(): CollectorRecoveryState {

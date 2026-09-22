@@ -11,6 +11,8 @@ interface KnownSource {
   platform: Exclude<Platform, 'UNKNOWN'>
   configurationStatus: 'configured'
   lastSeenAt: number | null
+  preferredInput: 'CONTROLLER' | 'WHEEL' | 'OTHER' | 'UNKNOWN'
+  inputOrigin: 'user_selected' | 'unknown'
 }
 /** V1 remembers one logical connection profile per platform, not hardware serial identity. */
 export class TelemetrySourceManager {
@@ -25,7 +27,7 @@ export class TelemetrySourceManager {
   private lastSavedAt = 0
   private persistence: Promise<void> = Promise.resolve()
   private lastPersistenceError: Error | null = null
-  private current: CaptureProfile = { platform: 'UNKNOWN', captureMethod: null, platformOrigin: 'unknown', sourceDeviceId: null }
+  private current: CaptureProfile = { platform: 'UNKNOWN', captureMethod: null, platformOrigin: 'unknown', sourceDeviceId: null, inputDevice: 'UNKNOWN', inputOrigin: 'unknown' }
 
   constructor(private file: string, private onError: (error: Error) => void = () => {}) {
     try {
@@ -42,7 +44,10 @@ export class TelemetrySourceManager {
           record.configurationStatus !== 'configured' || ids.has(record.sourceId) || platforms.has(record.platform) ||
           (record.lastSeenAt !== null && (!Number.isFinite(record.lastSeenAt) || record.lastSeenAt < 0))) throw new Error('Invalid known source')
         ids.add(record.sourceId); platforms.add(record.platform)
-        return { sourceId: record.sourceId, name: record.name, platform: record.platform, configurationStatus: 'configured', lastSeenAt: record.lastSeenAt }
+        const preferredInput = ['CONTROLLER', 'WHEEL', 'OTHER'].includes(String(record.preferredInput))
+          ? record.preferredInput : 'UNKNOWN'
+        return { sourceId: record.sourceId, name: record.name, platform: record.platform, configurationStatus: 'configured', lastSeenAt: record.lastSeenAt,
+          preferredInput, inputOrigin: preferredInput === 'UNKNOWN' ? 'unknown' : 'user_selected' }
       })
     } catch (error) {
       this.sources = []
@@ -66,10 +71,25 @@ export class TelemetrySourceManager {
         platform,
         configurationStatus: 'configured',
         lastSeenAt: null,
+        preferredInput: 'UNKNOWN',
+        inputOrigin: 'unknown',
       }
       this.sources.push(source)
       this.persist()
     }
+    return { ...source }
+  }
+
+  setPreferredInput(sourceId: string, input: KnownSource['preferredInput']): KnownSource {
+    const source = this.sources.find((record) => record.sourceId === sourceId)
+    if (!source) throw new Error('Racing device was not found')
+    source.preferredInput = input
+    source.inputOrigin = input === 'UNKNOWN' ? 'unknown' : 'user_selected'
+    if (this.activeSourceId === sourceId) {
+      this.current.inputDevice = source.preferredInput
+      this.current.inputOrigin = source.inputOrigin
+    }
+    this.persist()
     return { ...source }
   }
 
@@ -102,7 +122,7 @@ export class TelemetrySourceManager {
     }
     if (changed) {
       if (this.activeUid) this.retiredUids = [...this.retiredUids.slice(-15), this.activeUid]
-      this.current = { platform: 'UNKNOWN', captureMethod: null, platformOrigin: 'unknown', sourceDeviceId: null }
+      this.current = { platform: 'UNKNOWN', captureMethod: null, platformOrigin: 'unknown', sourceDeviceId: null, inputDevice: 'UNKNOWN', inputOrigin: 'unknown' }
       this.activeSourceId = null
     }
     const known = platform === 'UNKNOWN' ? null : this.remember(platform, now)
@@ -114,7 +134,8 @@ export class TelemetrySourceManager {
     this.activeUid = uid
     if (known) {
       this.activeSourceId = known.sourceId
-      this.current = { platform: known.platform, captureMethod: known.platform === 'PC' ? 'PC_NATIVE' : 'CONSOLE_DESKTOP', platformOrigin: origin, sourceDeviceId: known.sourceId }
+      this.current = { platform: known.platform, captureMethod: known.platform === 'PC' ? 'PC_NATIVE' : 'CONSOLE_DESKTOP', platformOrigin: origin, sourceDeviceId: known.sourceId,
+        inputDevice: known.preferredInput, inputOrigin: known.inputOrigin }
     }
     if (this.activeSourceId) {
       this.seen.set(this.activeSourceId, now)
@@ -146,7 +167,8 @@ export class TelemetrySourceManager {
     let source = this.sources.find((record) => record.platform === platform)
     const created = !source
     if (!source) {
-      source = { sourceId: randomUUID(), name: platform === 'PLAYSTATION' ? 'PlayStation source' : platform === 'XBOX' ? 'Xbox source' : 'PC source', platform, configurationStatus: 'configured', lastSeenAt: now }
+      source = { sourceId: randomUUID(), name: platform === 'PLAYSTATION' ? 'PlayStation source' : platform === 'XBOX' ? 'Xbox source' : 'PC source', platform, configurationStatus: 'configured', lastSeenAt: now,
+        preferredInput: 'UNKNOWN', inputOrigin: 'unknown' }
       this.sources.push(source)
     }
     source.lastSeenAt = now

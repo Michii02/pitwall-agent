@@ -55,6 +55,21 @@ test('wizard registration persists an offline source without overriding detected
     await restored.flush()
   })
 })
+test('user-selected input stays independent from platform and survives restart', async () => {
+  await withRegistry(async (manager, file) => {
+    const source = manager.registerConfiguredSource('PLAYSTATION')
+    manager.setPreferredInput(source.sourceId, 'WHEEL')
+    await manager.flushRequired()
+    const restored = new TelemetrySourceManager(file)
+    assert.equal(restored.snapshot().sources[0].preferredInput, 'WHEEL')
+    assert.equal(restored.snapshot().sources[0].inputOrigin, 'user_selected')
+    restored.observe(fixture(3), 'console', false, undefined, 100)
+    assert.equal(restored.captureProfile.platform, 'PLAYSTATION')
+    assert.equal(restored.captureProfile.inputDevice, 'WHEEL')
+    assert.equal(restored.captureProfile.inputOrigin, 'user_selected')
+    await restored.flush()
+  })
+})
 test('unknown, opponent, invalid player and forced layout evidence do not invent platform', async () => {
   await withRegistry(async (manager) => {
     for (const result of [fixture(255), { ...fixture(), header: { ...fixture().header, playerCarIndex: 22 } },

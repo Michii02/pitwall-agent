@@ -29,11 +29,9 @@ export type AgentHealthPushPayload = HealthSnapshot & {
   capturePlatform: AgentConfig['capturePlatform'] | null
 }
 
-export type AgentCommand = {
-  id: string
-  command: 'registerSource'
-  data: { platform: 'PC' | 'PLAYSTATION' | 'XBOX' }
-}
+export type AgentCommand =
+  | { id: string; command: 'registerSource'; data: { platform: 'PC' | 'PLAYSTATION' | 'XBOX' } }
+  | { id: string; command: 'setSourceInput'; data: { sourceId: string; input: 'CONTROLLER' | 'WHEEL' | 'OTHER' | 'UNKNOWN' } }
 
 // How often to ping the server once connected, and how long without a pong
 // before the connection is declared dead. 'close'/'error' alone are not
@@ -137,19 +135,33 @@ export class LiveForwarder {
     let value: unknown
     try { value = JSON.parse(raw) } catch { return }
     if (!value || typeof value !== 'object') return
-    const message = value as { type?: unknown; id?: unknown; command?: unknown; data?: { platform?: unknown } }
+    const message = value as { type?: unknown; id?: unknown; command?: unknown; data?: { platform?: unknown; sourceId?: unknown; input?: unknown } }
     if (message.type !== 'agentCommand' || typeof message.id !== 'string') return
-    const platform = message.data?.platform
-    if (message.command !== 'registerSource' || !['PC', 'PLAYSTATION', 'XBOX'].includes(String(platform)) || !this.onCommand) {
+    if (!this.onCommand) {
+      this.sendCommandResult(socket, message.id, false, undefined, 'Unsupported Companion command.')
+      return
+    }
+    let command: AgentCommand
+    if (message.command === 'registerSource' && ['PC', 'PLAYSTATION', 'XBOX'].includes(String(message.data?.platform))) {
+      command = { id: message.id, command: 'registerSource', data: { platform: message.data?.platform as 'PC' | 'PLAYSTATION' | 'XBOX' } }
+    } else if (message.command === 'setSourceInput' && typeof message.data?.sourceId === 'string'
+      && ['CONTROLLER', 'WHEEL', 'OTHER', 'UNKNOWN'].includes(String(message.data.input))) {
+      command = { id: message.id, command: 'setSourceInput', data: { sourceId: message.data.sourceId, input: message.data.input as 'CONTROLLER' | 'WHEEL' | 'OTHER' | 'UNKNOWN' } }
+    } else {
       this.sendCommandResult(socket, message.id, false, undefined, 'Unsupported Companion command.')
       return
     }
     try {
-      const data = await this.onCommand({ id: message.id, command: 'registerSource', data: { platform: platform as AgentCommand['data']['platform'] } })
+      const data = await this.onCommand(command)
       this.sendCommandResult(socket, message.id, true, data)
     } catch (error) {
       log.warn(`Companion command failed: ${(error as Error).message}`)
-      this.sendCommandResult(socket, message.id, false, undefined, 'The racing device could not be saved.')
+      const detail = (error as Error).message.includes('active session')
+        ? 'Finish the active session before changing racing input.'
+        : (error as Error).message.includes('not found')
+          ? 'Racing device was not found.'
+          : 'The racing device could not be saved.'
+      this.sendCommandResult(socket, message.id, false, undefined, detail)
     }
   }
 

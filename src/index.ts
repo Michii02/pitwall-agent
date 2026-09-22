@@ -153,8 +153,12 @@ async function main(): Promise<void> {
     queueDepth: queue.pendingCount(),
   })
   const live = new LiveForwarder(config, () => lifecycle.snapshot, buildHealthPushPayload, async (command) => {
-    if (command.command !== 'registerSource') throw new Error('Unsupported command')
-    sources.registerConfiguredSource(command.data.platform)
+    if (command.command === 'registerSource') sources.registerConfiguredSource(command.data.platform)
+    else if (command.command === 'setSourceInput') {
+      if (lifecycle.snapshot.active) throw new Error('Finish the active session before changing racing input')
+      sources.setPreferredInput(command.data.sourceId, command.data.input)
+      lifecycle.updateCaptureProfile(sources.captureProfile)
+    } else throw new Error('Unsupported command')
     await sources.flushRequired()
     const snapshot = sources.snapshot()
     live.pushHealth(buildHealthPushPayload())
